@@ -134,6 +134,7 @@ def launch():
             self.force_choice = Gtk.DropDown.new_from_strings([])
             self.force_names = []
             self.strength = Gtk.DropDown.new_from_strings([f"{value}%" for value in TEST_STRENGTHS])
+            self.strength.set_selected(TEST_STRENGTHS.index(25))
             self.test_button = self.button("Play force test", self.play)
             self.reference_test = self.button("Play 50% sine for 1 second", self.prepare_reference_sine)
             self.stop_button = self.button("Stop", self.stop)

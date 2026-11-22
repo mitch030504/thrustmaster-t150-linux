@@ -37,17 +37,17 @@ real wheel, or capture replay.
    brake, and the remaining pedal active if attached. Restore separate
    mode after the check. Test shorter rotation ranges on hardware
    before exposing them.
-3. Start with Sine at low strength. If the movement is too small to
-   see, center the wheel, keep the rim clear, and choose **Play 50%
-   sine for 1 second**. On a T150RS with firmware 35 and CachyOS
-   7.4.0-rc3-1, the direct evdev probe measured 18 steering reversals
-   and a span of 443 counts, with zero movement at idle. The panel's
-   dedicated button also moved the same wheel during the hardware test.
-   Check both directions of constant force and the other advertised
-   waveforms separately. The standard test offers 5%, 10%, 25%, and
-   50% strength. Spring and Damper run for two seconds so you can
-   feel the resistance while turning the rim gently. Verify that Stop, closing the panel, and
-   switching focus stop an active effect.
+3. Start with the panel's 25% default. On a T150RS with firmware 35
+   and CachyOS 7.4.0-rc3-1, 25% and 50% produced noticeable feedback
+   during panel testing. Feedback at 5% and 10% was imperceptible on
+   that wheel. With the rim clear, **Play 50% sine for 1 second**
+   provides a reference pulse. The direct evdev probe for that pulse
+   measured 18 steering reversals and a span of 443 counts, with zero
+   movement at idle. The panel's dedicated button also moved the wheel.
+   Check both directions of constant force and the other waveforms
+   separately. Spring and Damper run for two seconds so you can feel
+   resistance while turning the rim gently. Verify that Stop, closing
+   the panel, and switching focus stop an active effect.
 4. Exercise upload, play, stop, update, and erase in all nine slots.
    Stop while an update is queued and check that it stays stopped.
    Check removal, unplug/replug, and suspend/resume for stale effects.
