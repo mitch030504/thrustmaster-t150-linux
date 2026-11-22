@@ -23,13 +23,20 @@ class PanelTests(unittest.TestCase):
     def test_every_panel_force_is_bounded(self):
         for name in panel["TESTS"]:
             with self.subTest(name=name):
-                effect = panel["build_effect"](name, 5)
+                effect = panel["build_effect"](name, 50)
                 self.assertEqual(effect.id, -1)
-                self.assertEqual(effect.ff_replay.length, 1000 if name == "Sine" else 500)
-        with self.assertRaises(ValueError):
-            panel["build_effect"]("Turn right", 11)
-        with self.assertRaises(ValueError):
-            panel["build_effect"]("Sine", 51)
+                self.assertGreater(effect.ff_replay.length, 0)
+                self.assertLessEqual(effect.ff_replay.length, 2000)
+                with self.assertRaises(ValueError):
+                    panel["build_effect"](name, 51)
+
+    def test_condition_and_rumble_use_the_unsigned_magnitude_range(self):
+        spring = panel["build_effect"]("Spring", 50)
+        self.assertEqual(spring.ff_replay.length, 2000)
+        self.assertEqual(spring.u.ff_condition_effect[0].right_coeff, 16384)
+        self.assertEqual(spring.u.ff_condition_effect[0].right_saturation, 32768)
+        rumble = panel["build_effect"]("Rumble", 50).u.ff_rumble_effect
+        self.assertEqual((rumble.strong_magnitude, rumble.weak_magnitude), (32768, 32768))
 
     def test_sine_matches_physical_probe(self):
         effect = panel["build_effect"]("Sine", 50)

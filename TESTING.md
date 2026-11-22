@@ -44,8 +44,9 @@ real wheel, or capture replay.
    and a span of 443 counts, with zero movement at idle. The panel's
    dedicated button also moved the same wheel during the hardware test.
    Check both directions of constant force and the other advertised
-   waveforms separately. Evaluate spring and damper as resistance
-   when turning the rim. Verify that Stop, closing the panel, and
+   waveforms separately. The standard test offers 5%, 10%, 25%, and
+   50% strength. Spring and Damper run for two seconds so you can
+   feel the resistance while turning the rim gently. Verify that Stop, closing the panel, and
    switching focus stop an active effect.
 4. Exercise upload, play, stop, update, and erase in all nine slots.
    Stop while an update is queued and check that it stays stopped.

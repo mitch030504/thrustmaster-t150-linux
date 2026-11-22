@@ -50,6 +50,13 @@ def main():
             "OUT 41 00 41 01", "OUT 41 00 00 01",
             "OUT 02 fc 00 00 00 00 00 00 00", "OUT 04 ee 00 08 00 00 7d 00",
             "OUT 01 08 22 40 f4 01 00 00 00 ee 00 fc 00 00 00",
+            # The archived Windows spring and damper traces send parameters first.
+            "OUT 05 ee 00 64 64 00 00 00 00 54 54",
+            "OUT 05 fc 00 00 00 00 00 00 00 46 54",
+            "OUT 01 08 40 40 b8 0b 00 00 00 ee 00 fc 00 00 00",
+            "OUT 05 ee 00 64 64 00 00 00 00 64 64",
+            "OUT 05 fc 00 00 00 00 00 00 00 64 64",
+            "OUT 01 08 41 40 b8 0b 00 00 00 ee 00 fc 00 00 00",
             "T150_GUEST_USB_OK",
         ]
         lines = iter(result.stdout.splitlines())

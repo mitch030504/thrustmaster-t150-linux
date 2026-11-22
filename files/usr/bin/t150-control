@@ -14,7 +14,7 @@ from evdev import InputDevice, ecodes as e, ff
 
 HID_PATH = Path("/sys/bus/hid/devices")
 FIRMWARE_PAGE = "https://support.thrustmaster.com/en/product/t150ffb-en/"
-TEST_MAX_PERCENT = 10
+TEST_STRENGTHS = (5, 10, 25, 50)
 REFERENCE_SINE_PERCENT = 50
 LIMITS = {
     "range": (270, 1080), "gain": (0, 65535), "autocenter": (0, 65535),
@@ -73,26 +73,28 @@ def save_profile(path, values):
 
 
 def build_effect(name, percent):
-    maximum = REFERENCE_SINE_PERCENT if name == "Sine" else TEST_MAX_PERCENT
+    maximum = TEST_STRENGTHS[-1]
     if not 1 <= percent <= maximum:
         raise ValueError(f"Test strength must be between 1% and {maximum}%")
     kind, option = TESTS[name]
     level = 32768 * percent // 100
-    duration = 1000 if name == "Sine" else 500
+    duration = 500
     direction = 0x4000
     if kind == e.FF_CONSTANT:
         direction = option
         data = ff.EffectType(ff_constant_effect=ff.Constant(level, ff.Envelope()))
     elif kind == e.FF_PERIODIC:
+        duration = 1000
         period = 107 if option == e.FF_SINE else 125
         data = ff.EffectType(ff_periodic_effect=ff.Periodic(option, period, level, 0, 0,
                                                            ff.Envelope(), 0, None))
     elif kind == e.FF_RAMP:
         data = ff.EffectType(ff_ramp_effect=ff.Ramp(0, level, ff.Envelope()))
     elif kind == e.FF_RUMBLE:
-        data = ff.EffectType(ff_rumble_effect=ff.Rumble(level, 0))
+        data = ff.EffectType(ff_rumble_effect=ff.Rumble(2 * level, 2 * level))
     else:
-        condition = ff.Condition(level, level, level, level, 0, 0)
+        duration = 2000
+        condition = ff.Condition(2 * level, 2 * level, level, level, 0, 0)
         data = ff.EffectType(ff_condition_effect=(ff.Condition * 2)(condition, ff.Condition()))
     return ff.Effect(kind, -1, direction, ff.Trigger(), ff.Replay(duration, 0), data)
 
@@ -131,15 +133,16 @@ def launch():
             force = self.page("forces", "Forces")
             self.force_choice = Gtk.DropDown.new_from_strings([])
             self.force_names = []
-            self.strength = Gtk.SpinButton.new_with_range(1, TEST_MAX_PERCENT, 1)
-            self.strength.set_value(5)
-            self.strength.set_tooltip_text("Test strength in percent")
+            self.strength = Gtk.DropDown.new_from_strings([f"{value}%" for value in TEST_STRENGTHS])
             self.test_button = self.button("Play force test", self.play)
             self.reference_test = self.button("Play 50% sine for 1 second", self.prepare_reference_sine)
             self.stop_button = self.button("Stop", self.stop)
-            for widget in (Gtk.Label(label="Test strength (%)", xalign=0), self.strength,
+            for widget in (Gtk.Label(label="Test strength", xalign=0), self.strength,
                            self.force_choice,
-                           Gtk.Label(label="Keep the rim clear before playing a force test.", xalign=0, wrap=True),
+                           Gtk.Label(
+                               label="Keep the rim clear for force pulses. For Spring and Damper, "
+                                     "turn the wheel gently during the test to feel resistance.",
+                               xalign=0, wrap=True),
                            self.test_button, self.reference_test, self.stop_button):
                 force.append(widget)
 
@@ -418,8 +421,7 @@ def launch():
             self.stop()
             try:
                 name = self.force_names[self.force_choice.get_selected()]
-                self.strength.update()
-                effect = build_effect(name, self.strength.get_value_as_int())
+                effect = build_effect(name, TEST_STRENGTHS[self.strength.get_selected()])
             except (ValueError, IndexError) as exc:
                 self.status.set_text(f"Force test failed. {exc}")
             else:

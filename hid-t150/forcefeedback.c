@@ -105,7 +105,8 @@ static inline void t150_free_ffb(struct t150 *t150)
 	t150->ff_effects = NULL;
 }
 
-static void t150_ff_prepare_first(struct ff_first *ff_first, struct ff_effect *effect)
+static void t150_ff_prepare_first(struct t150 *t150, struct ff_first *ff_first,
+				 struct ff_effect *effect)
 {
 	struct ff_envelope *ff_envelope;
 
@@ -132,6 +133,8 @@ static void t150_ff_prepare_first(struct ff_first *ff_first, struct ff_effect *e
 	ff_first->f1 = 0;
 	ff_first->f2 = 0x46;
 	ff_first->f3 = 0x54;
+	if (effect->type == FF_DAMPER && t150->hid_device->product == USB_T150_PRODUCT_ID)
+		ff_first->f2 = ff_first->f3 = 0x64;
 
 	if (ff_envelope) {
 		ff_first->attack_length = cpu_to_le16(ff_envelope->attack_length);
@@ -259,68 +262,61 @@ static int t150_ff_send_upload(struct t150 *t150, struct t150_ff_effect *slot)
 	struct ff_first first_old = { 0 }, first_new = { 0 };
 	struct ff_update update_old = { 0 }, update_new = { 0 };
 	struct ff_commit commit_old = { 0 }, commit_new = { 0 };
-	size_t first_len = sizeof(first_new);
-	size_t update_len = sizeof(update_new);
-	int errno = 0;
+	struct {
+		const char *name;
+		const void *old_data;
+		const void *data;
+		size_t length;
+	} packets[] = {
+		{ "first", &first_old, &first_new, sizeof(first_new) },
+		{ "update", &update_old, &update_new, sizeof(update_new) },
+		{ "commit", &commit_old, &commit_new, sizeof(commit_new) },
+	};
+	int i, ret = 0;
 
-	t150_ff_prepare_first(&first_new, &slot->effect);
+	t150_ff_prepare_first(t150, &first_new, &slot->effect);
 	t150_ff_prepare_update(t150, &update_new, &slot->effect);
 	t150_ff_prepare_commit(&commit_new, &slot->effect);
 
-	/* Constant and periodic transfers use their own sizes in T150 captures. */
 	if (t150->hid_device->product == USB_T150_PRODUCT_ID) {
 		switch (update_new.effect_class) {
 		case T150_FF_UPDATE_CODE_CONSTANT:
-			first_len = offsetof(struct ff_first, f2);
-			update_len = offsetofend(struct ff_update, effect.constant);
+			packets[0].length = offsetof(struct ff_first, f2);
+			packets[1].length = offsetofend(struct ff_update, effect.constant);
 			break;
 		case T150_FF_UPDATE_CODE_PERIODIC:
-			first_len = offsetof(struct ff_first, f2);
-			update_len = offsetofend(struct ff_update, effect.periodic);
+			packets[0].length = offsetof(struct ff_first, f2);
+			packets[1].length = offsetofend(struct ff_update, effect.periodic);
+			break;
+		case T150_FF_UPDATE_CODE_CONDITION:
+			/* The Windows T150 traces send condition parameters before the slot record. */
+			swap(packets[0], packets[1]);
 			break;
 		}
 	}
 
 	if (slot->has_old) {
-		t150_ff_prepare_first(&first_old, &slot->old);
+		t150_ff_prepare_first(t150, &first_old, &slot->old);
 		t150_ff_prepare_update(t150, &update_old, &slot->old);
 		t150_ff_prepare_commit(&commit_old, &slot->old);
 	}
 
 	mutex_lock(&t150->lock);
-	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
-	    memcmp(&first_old, &first_new, sizeof(first_new))) {
-		errno = t150_send_int_locked(t150, &first_new, first_len);
-		if (errno) {
-			hid_err(t150->hid_device, "ffb first packet of effect %d failed: %d\n",
-				slot->effect.id, errno);
-			goto out;
+	for (i = 0; i < ARRAY_SIZE(packets); i++) {
+		if (!T150_FF_BLIND_UPLOAD && slot->has_old &&
+		    !memcmp(packets[i].old_data, packets[i].data, packets[i].length))
+			continue;
+
+		ret = t150_send_int_locked(t150, packets[i].data, packets[i].length);
+		if (ret) {
+			hid_err(t150->hid_device, "ffb %s packet of effect %d failed: %d\n",
+				packets[i].name, slot->effect.id, ret);
+			break;
 		}
 	}
-
-	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
-	    memcmp(&update_old, &update_new, sizeof(update_new))) {
-		errno = t150_send_int_locked(t150, &update_new, update_len);
-		if (errno) {
-			hid_err(t150->hid_device, "ffb update packet of effect %d failed: %d\n",
-				slot->effect.id, errno);
-			goto out;
-		}
-	}
-
-	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
-	    memcmp(&commit_old, &commit_new, sizeof(commit_new))) {
-		errno = t150_send_int_locked(t150, &commit_new, sizeof(commit_new));
-		if (errno) {
-			hid_err(t150->hid_device, "ffb commit packet of effect %d failed: %d\n",
-				slot->effect.id, errno);
-			goto out;
-		}
-	}
-
-out:
 	mutex_unlock(&t150->lock);
-	return errno;
+
+	return ret;
 }
 
 static int t150_ff_send_play(struct t150 *t150, int effect_id, int times)

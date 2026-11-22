@@ -221,6 +221,15 @@ int main(void)
 		.replay = { .length = 500 },
 		.u.periodic = { .waveform = FF_SINE, .period = 125, .magnitude = 2048 } };
 	require(ioctl(wheel, EVIOCSFF, &sine) == 0 && sine.id == count - 1, "upload sine");
+	for (int i = 0; i < 2; ++i) {
+		struct ff_effect condition = { .type = i ? FF_DAMPER : FF_SPRING,
+			.id = -1, .replay = { .length = 3000 },
+			.u.condition = {{ .right_saturation = 65535, .left_saturation = 65535,
+				.right_coeff = 32767, .left_coeff = 32767 }} };
+		require(ioctl(wheel, EVIOCRMFF, count - 1) == 0, "release slot for condition");
+		require(ioctl(wheel, EVIOCSFF, &condition) == 0 &&
+			condition.id == count - 1, "upload condition");
+	}
 	close(wheel);
 	write_sysfs("/sys/bus/hid/drivers/hid-t150/unbind", id);
 	puts("T150_GUEST_USB_OK");
