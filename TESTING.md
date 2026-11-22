@@ -39,10 +39,10 @@ real wheel, or capture replay.
    before exposing them.
 3. Start with Sine at low strength. If the movement is too small to
    see, center the wheel, keep the rim clear, and choose **Play 50%
-   sine for 1 second**. The one-second
-   107 ms-period sine at 50% was verified through evdev on a T150RS
-   with firmware 35 and CachyOS 7.4.0-rc3-1. It produced 18 steering
-   reversals and a span of 443 counts, with zero movement at idle.
+   sine for 1 second**. On a T150RS with firmware 35 and CachyOS
+   7.4.0-rc3-1, the direct evdev probe measured 18 steering reversals
+   and a span of 443 counts, with zero movement at idle. The panel's
+   dedicated button also moved the same wheel during the hardware test.
    Check both directions of constant force and the other advertised
    waveforms separately. Evaluate spring and damper as resistance
    when turning the rim. Verify that Stop, closing the panel, and
