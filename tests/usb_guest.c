@@ -216,6 +216,11 @@ int main(void)
 	play.value = 0;
 	require(write(wheel, &play, sizeof(play)) == sizeof(play), "stop effect");
 	usleep(40000);
+	require(ioctl(wheel, EVIOCRMFF, count - 1) == 0, "release final slot");
+	struct ff_effect sine = { .type = FF_PERIODIC, .id = -1, .direction = 0x4000,
+		.replay = { .length = 500 },
+		.u.periodic = { .waveform = FF_SINE, .period = 125, .magnitude = 2048 } };
+	require(ioctl(wheel, EVIOCSFF, &sine) == 0 && sine.id == count - 1, "upload sine");
 	close(wheel);
 	write_sysfs("/sys/bus/hid/drivers/hid-t150/unbind", id);
 	puts("T150_GUEST_USB_OK");

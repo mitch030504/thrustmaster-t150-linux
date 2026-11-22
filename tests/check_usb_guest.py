@@ -42,15 +42,19 @@ def main():
             "-initrd", str(guest / "initramfs"), "-append", "console=ttyS0 rdinit=/init loglevel=5",
         ], capture_output=True, text=True, timeout=25, check=True)
         print(result.stdout, end="")
-        required = ["OUT 43 ff ff", "OUT 40 11 ff ff", "OUT 03 0e 00 04",
-                    "OUT 01 00 00 40 f4 01", "OUT 01 08 00 40 f4 01",
-                    "OUT 41 00 41 01", "OUT 41 00 00 01", "T150_GUEST_USB_OK"]
-        position = 0
-        for line in required:
-            found = result.stdout.find(line, position)
-            if found < 0:
-                raise SystemExit(f"Missing or out-of-order guest output: {line}")
-            position = found + len(line)
+        required = [
+            "OUT 43 80", "OUT 40 11 ff ff",
+            "OUT 02 1c 00 00 00 00 00 00 00", "OUT 03 0e 00 04",
+            "OUT 01 00 00 40 f4 01 00 00 00 0e 00 1c 00 00 00",
+            "OUT 41 00 41 01", "OUT 41 00 00 01",
+            "OUT 02 fc 00 00 00 00 00 00 00", "OUT 04 ee 00 08 00 00 7d 00",
+            "OUT 01 08 22 40 f4 01 00 00 00 ee 00 fc 00 00 00",
+            "T150_GUEST_USB_OK",
+        ]
+        lines = iter(result.stdout.splitlines())
+        for expected in required:
+            if not any(line == expected for line in lines):
+                raise SystemExit(f"Missing or out-of-order guest output: {expected}")
 
 
 if __name__ == "__main__":

@@ -259,11 +259,27 @@ static int t150_ff_send_upload(struct t150 *t150, struct t150_ff_effect *slot)
 	struct ff_first first_old = { 0 }, first_new = { 0 };
 	struct ff_update update_old = { 0 }, update_new = { 0 };
 	struct ff_commit commit_old = { 0 }, commit_new = { 0 };
+	size_t first_len = sizeof(first_new);
+	size_t update_len = sizeof(update_new);
 	int errno = 0;
 
 	t150_ff_prepare_first(&first_new, &slot->effect);
 	t150_ff_prepare_update(t150, &update_new, &slot->effect);
 	t150_ff_prepare_commit(&commit_new, &slot->effect);
+
+	/* Constant and periodic transfers use their own sizes in T150 captures. */
+	if (t150->hid_device->product == USB_T150_PRODUCT_ID) {
+		switch (update_new.effect_class) {
+		case T150_FF_UPDATE_CODE_CONSTANT:
+			first_len = offsetof(struct ff_first, f2);
+			update_len = offsetofend(struct ff_update, effect.constant);
+			break;
+		case T150_FF_UPDATE_CODE_PERIODIC:
+			first_len = offsetof(struct ff_first, f2);
+			update_len = offsetofend(struct ff_update, effect.periodic);
+			break;
+		}
+	}
 
 	if (slot->has_old) {
 		t150_ff_prepare_first(&first_old, &slot->old);
@@ -274,7 +290,7 @@ static int t150_ff_send_upload(struct t150 *t150, struct t150_ff_effect *slot)
 	mutex_lock(&t150->lock);
 	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
 	    memcmp(&first_old, &first_new, sizeof(first_new))) {
-		errno = t150_send_int_locked(t150, &first_new, sizeof(first_new));
+		errno = t150_send_int_locked(t150, &first_new, first_len);
 		if (errno) {
 			hid_err(t150->hid_device, "ffb first packet of effect %d failed: %d\n",
 				slot->effect.id, errno);
@@ -284,7 +300,7 @@ static int t150_ff_send_upload(struct t150 *t150, struct t150_ff_effect *slot)
 
 	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
 	    memcmp(&update_old, &update_new, sizeof(update_new))) {
-		errno = t150_send_int_locked(t150, &update_new, sizeof(update_new));
+		errno = t150_send_int_locked(t150, &update_new, update_len);
 		if (errno) {
 			hid_err(t150->hid_device, "ffb update packet of effect %d failed: %d\n",
 				slot->effect.id, errno);

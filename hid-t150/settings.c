@@ -39,10 +39,15 @@ static int t150_send_int(struct t150 *t150, const void *data, size_t len)
  */
 static int t150_send_gain(struct t150 *t150, u16 limit, u16 game)
 {
-	struct ff_change_gain buffer = {
-		.f0 = 0x43,
-		.gain = cpu_to_le16(DIV_ROUND_CLOSEST((u32)limit * game, (u32)U16_MAX)),
-	};
+	u16 gain = DIV_ROUND_CLOSEST((u32)limit * game, (u32)U16_MAX);
+	struct ff_change_gain buffer = { .f0 = 0x43, .gain = cpu_to_le16(gain) };
+
+	if (t150->hid_device->product == USB_T150_PRODUCT_ID) {
+		/* The T150 wire value is one byte, with 0x80 representing full gain. */
+		u8 packet[] = { 0x43, DIV_ROUND_CLOSEST((u32)gain * 0x80, U16_MAX) };
+
+		return t150_send_int(t150, packet, sizeof(packet));
+	}
 
 	return t150_send_int(t150, &buffer, sizeof(buffer));
 }
