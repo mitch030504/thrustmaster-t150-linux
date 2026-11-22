@@ -17,7 +17,7 @@
 #define T150_RANGE_TMX_MAX		900
 
 #define T150_PKT_INPUT_OPEN		0x0442
-#define T150_PKT_INPUT_WHAT		0x0542
+#define T150_PKT_INPUT_APPLY		0x0542
 #define T150_PKT_INPUT_CLOSE		0x0042
 
 struct joy_state_packet;

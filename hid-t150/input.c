@@ -59,16 +59,32 @@ static int t150_input_open(struct input_dev *dev)
 	if (ret)
 		return ret;
 
+	if (t150->hid_device->product == USB_T150_PRODUCT_ID) {
+		/* Finish the settings transaction before uploading effects. */
+		__le16 apply = cpu_to_le16(T150_PKT_INPUT_APPLY);
+
+		ret = t150_send_int(t150, &apply, sizeof(apply));
+		if (ret)
+			goto close_session;
+	}
+
 	ret = hid_hw_open(t150->hid_device);
-	if (!ret)
-		WRITE_ONCE(t150->ff_paused, false);
+	if (ret)
+		goto close_session;
+
+	WRITE_ONCE(t150->ff_paused, false);
+	return 0;
+
+close_session:
+	packet = cpu_to_le16(T150_PKT_INPUT_CLOSE);
+	t150_send_int(t150, &packet, sizeof(packet));
 	return ret;
 }
 
 static void t150_input_close(struct input_dev *dev)
 {
 	struct t150 *t150 = input_get_drvdata(dev);
-	__le16 what = cpu_to_le16(T150_PKT_INPUT_WHAT);
+	__le16 apply = cpu_to_le16(T150_PKT_INPUT_APPLY);
 	__le16 close = cpu_to_le16(T150_PKT_INPUT_CLOSE);
 	int i;
 
@@ -76,7 +92,7 @@ static void t150_input_close(struct input_dev *dev)
 	hid_hw_close(t150->hid_device);
 
 	for (i = 0; i < 2; i++)
-		t150_send_int(t150, &what, sizeof(what));
+		t150_send_int(t150, &apply, sizeof(apply));
 
 	t150_send_int(t150, &close, sizeof(close));
 }

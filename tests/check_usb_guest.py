@@ -44,6 +44,7 @@ def main():
         print(result.stdout, end="")
         required = [
             "OUT 43 80", "OUT 40 11 ff ff",
+            "OUT 42 04", "OUT 42 05",
             "OUT 02 1c 00 00 00 00 00 00 00", "OUT 03 0e 00 04",
             "OUT 01 00 00 40 f4 01 00 00 00 0e 00 1c 00 00 00",
             "OUT 41 00 41 01", "OUT 41 00 00 01",
