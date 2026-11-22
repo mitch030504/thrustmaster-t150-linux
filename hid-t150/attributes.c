@@ -1,4 +1,73 @@
+#define T150_LEVEL_ATTR(name, effect_type, limit) \
+static ssize_t name##_show(struct device *dev, struct device_attribute *attr, char *buf) \
+{ \
+	struct t150 *t150 = dev_get_drvdata(dev); \
+	return sysfs_emit(buf, "%u\n", READ_ONCE(t150->name)); \
+} \
+static ssize_t name##_store(struct device *dev, struct device_attribute *attr, \
+			    const char *buf, size_t count) \
+{ \
+	struct t150 *t150 = dev_get_drvdata(dev); \
+	u8 value; \
+	if (kstrtou8(buf, 10, &value) || value > limit) \
+		return -EINVAL; \
+	WRITE_ONCE(t150->name, value); \
+	t150_ff_resubmit_condition_effects(t150, effect_type); \
+	return count; \
+} \
+static DEVICE_ATTR_RW(name)
+
+T150_LEVEL_ATTR(constant_level, FF_CONSTANT, 100);
+T150_LEVEL_ATTR(periodic_level, FF_PERIODIC, 100);
+
+static ssize_t boost_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct t150 *t150 = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(t150->boost));
+}
+
+static ssize_t boost_store(struct device *dev, struct device_attribute *attr,
+			   const char *buf, size_t count)
+{
+	struct t150 *t150 = dev_get_drvdata(dev);
+	bool boost;
+
+	if (kstrtobool(buf, &boost))
+		return -EINVAL;
+	WRITE_ONCE(t150->boost, boost);
+	t150_ff_resubmit_condition_effects(t150, FF_CONSTANT);
+	t150_ff_resubmit_condition_effects(t150, FF_PERIODIC);
+	return count;
+}
+static DEVICE_ATTR_RW(boost);
+
+static ssize_t combine_pedals_show(struct device *dev, struct device_attribute *attr,
+				    char *buf)
+{
+	struct t150 *t150 = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%u\n", READ_ONCE(t150->combine_pedals));
+}
+
+static ssize_t combine_pedals_store(struct device *dev, struct device_attribute *attr,
+				     const char *buf, size_t count)
+{
+	struct t150 *t150 = dev_get_drvdata(dev);
+	u8 mode;
+
+	if (kstrtou8(buf, 10, &mode) || mode > 2)
+		return -EINVAL;
+	WRITE_ONCE(t150->combine_pedals, mode);
+	return count;
+}
+static DEVICE_ATTR_RW(combine_pedals);
+
 static struct device_attribute *t150_attrs[] = {
+	&dev_attr_constant_level,
+	&dev_attr_periodic_level,
+	&dev_attr_boost,
+	&dev_attr_combine_pedals,
 	&dev_attr_autocenter,
 	&dev_attr_enable_autocenter,
 	&dev_attr_range,
@@ -19,9 +88,10 @@ static inline int t150_init_attributes(struct t150 *t150)
 {
 	int i, errno;
 
-	t150_setup_task(t150);
-
 	for (i = 0; i < ARRAY_SIZE(t150_attrs); i++) {
+		if (t150_attrs[i] == &dev_attr_combine_pedals &&
+		    !t150->combine_supported)
+			continue;
 		errno = device_create_file(&t150->hid_device->dev, t150_attrs[i]);
 		if (errno) {
 			while (--i >= 0)
@@ -258,7 +328,7 @@ static ssize_t t150_store_spring_level(struct device *dev, struct device_attribu
 	if (value > 100)
 		value = 100;
 
-	t150->spring_level = value;
+	WRITE_ONCE(t150->spring_level, value);
 	t150_ff_resubmit_condition_effects(t150, FF_SPRING);
 	return count;
 }
@@ -281,7 +351,7 @@ static ssize_t t150_store_damper_level(struct device *dev, struct device_attribu
 	if (value > 100)
 		value = 100;
 
-	t150->damper_level = value;
+	WRITE_ONCE(t150->damper_level, value);
 	t150_ff_resubmit_condition_effects(t150, FF_DAMPER);
 	return count;
 }

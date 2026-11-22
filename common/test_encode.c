@@ -1,4 +1,5 @@
 /* Host-side checks for T150 packet sizes and FFB encode helpers. */
+#include "t150_controls.h"
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -94,6 +95,19 @@ main(void)
 		   T150_PRESET_DEFAULT->spring_level,
 		   T150_PRESET_DEFAULT->damper_level,
 		   1080) == T150_PRESET_DEFAULT);
+
+	assert(t150_combined_axis(1023, 1023) == 511);
+	assert(t150_combined_axis(0, 1023) == 0);
+	assert(t150_combined_axis(1023, 0) == 1023);
+	assert(t150_combined_axis(0, 0) == 511);
+	assert(t150_scale_force(-32768, 100, 1) == -32768);
+	assert(t150_scale_force(32767, 100, 1) == 32767);
+	assert(t150_scale_force(20000, 0, 1) == 0);
+	for (int force = 0; force < 32767; force++) {
+		assert(t150_scale_force(force, 100, 0) == force);
+		assert(t150_scale_force(force, 100, 1) <=
+		       t150_scale_force(force + 1, 100, 1));
+	}
 
 	puts("t150 encode host test ok");
 	return 0;

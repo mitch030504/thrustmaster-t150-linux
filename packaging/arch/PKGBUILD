@@ -1,0 +1,37 @@
+# Build from this directory using makepkg.
+pkgbase=t150
+pkgname=(t150-dkms t150-control)
+pkgver=1.2.0
+pkgrel=0.1
+arch=(any)
+url=https://github.com/mitch030504/thrustmaster-t150-linux
+license=(GPL-2.0-only)
+_project=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+
+package_t150-dkms() {
+    pkgdesc='Thrustmaster T150 and TMX Linux force-feedback driver'
+    depends=(dkms systemd)
+    optdepends=('clang: Clang kernel builds' 'lld: Clang kernel linker'
+                'llvm: Clang kernel tools' 't150-control: wheel control panel')
+    local source="$pkgdir/usr/src/t150-$pkgver"
+    install -d "$source/hid-t150" "$source/common"
+    install -m 644 "$_project"/hid-t150/*.{c,h} "$_project"/hid-t150/Makefile "$source/hid-t150/"
+    install -m 644 "$_project"/common/t150_*.h "$source/common/"
+    install -Dm644 "$_project/dkms_make.mak" "$source/Makefile"
+    install -Dm644 "$_project/dkms.conf" "$source/dkms.conf"
+    install -Dm755 "$_project/files/usr/bin/t150-preset" "$pkgdir/usr/bin/t150-preset"
+    install -Dm755 "$_project/files/usr/lib/udev/hid-t150-rebind" "$pkgdir/usr/lib/udev/hid-t150-rebind"
+    install -Dm644 "$_project/files/etc/udev/rules.d/10-t150.rules" "$pkgdir/usr/lib/udev/rules.d/10-t150.rules"
+    install -Dm644 "$_project/files/etc/udev/rules.d/99-zz-t150-permissions.rules" "$pkgdir/usr/lib/udev/rules.d/99-zz-t150-permissions.rules"
+    install -Dm644 "$_project/files/usr/lib/sysusers.d/t150-control.conf" "$pkgdir/usr/lib/sysusers.d/t150-control.conf"
+    install -Dm644 "$_project/files/etc/modules-load.d/hid-t150.conf" "$pkgdir/usr/lib/modules-load.d/hid-t150.conf"
+}
+
+package_t150-control() {
+    pkgdesc='Linux control panel for the Thrustmaster T150'
+    depends=(python python-evdev python-gobject gtk4)
+    optdepends=('t150-dkms: force feedback and wheel settings')
+    install -Dm755 "$_project/files/usr/bin/t150-control" "$pkgdir/usr/bin/t150-control"
+    install -Dm644 "$_project/files/usr/share/applications/io.github.mitch030504.T150Control.desktop" \
+        "$pkgdir/usr/share/applications/io.github.mitch030504.T150Control.desktop"
+}

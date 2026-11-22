@@ -30,8 +30,10 @@ struct t150_ff_effect {
 	struct ff_effect effect;
 	struct ff_effect old;
 	bool has_old;
+	bool valid;
 	bool upload_pending;
 	bool play_pending;
+	bool stop_pending;
 	int play_value;
 };
 
@@ -52,6 +54,7 @@ struct t150 {
 	void *usb_buf;
 	size_t usb_buf_size;
 	bool gone;
+	bool suspended;
 
 	struct {
 		spinlock_t access_lock;
@@ -68,7 +71,11 @@ struct t150 {
 
 	struct work_struct settings_refresh_work;
 
+	struct mutex ff_io_lock;
 	spinlock_t ff_lock;
+	bool ff_paused;
+	bool ff_fault;
+	u16 game_gain;
 	struct work_struct ff_work;
 	struct t150_ff_effect *ff_effects;
 	uint16_t pending_gain;
@@ -76,6 +83,11 @@ struct t150 {
 	bool gain_pending;
 	bool autocenter_pending;
 
+	u8 constant_level;
+	u8 periodic_level;
+	bool boost;
+	u8 combine_pedals;
+	bool combine_supported;
 	uint8_t spring_level;
 	uint8_t damper_level;
 };
@@ -112,4 +124,5 @@ static inline void printP(uint8_t const *const bytes, const size_t length)
 }
 
 static int t150_send_int(struct t150 *t150, const void *data, size_t len);
+static int t150_send_int_locked(struct t150 *t150, const void *data, size_t len);
 static void t150_ff_schedule(struct t150 *t150);

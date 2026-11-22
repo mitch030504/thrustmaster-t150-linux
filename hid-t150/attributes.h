@@ -41,8 +41,7 @@ static ssize_t t150_store_reload_settings(struct device *dev, struct device_attr
 static ssize_t t150_store_firmware_upgrade(struct device *dev, struct device_attribute *attr,
 	const char *buf, size_t count);
 
-/* 0664: kernel forbids world-writable sysfs (VERIFY_OCTAL_PERMISSIONS).
- * udev chmod 0666 after bind so Oversteer can write as the logged-in user. */
+/* udev assigns writable attributes to the t150-control group. */
 static DEVICE_ATTR(autocenter, 0664, t150_show_return_force, t150_store_return_force);
 static DEVICE_ATTR(enable_autocenter, 0664, t150_show_simulate_return_force, t150_store_simulate_return_force);
 static DEVICE_ATTR(range, 0664, t150_show_range, t150_store_range);

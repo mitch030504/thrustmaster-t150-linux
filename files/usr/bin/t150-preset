@@ -110,7 +110,7 @@ name=$1
 applied=0
 for devdir in "${devices[@]}"; do
 	if [ ! -w "$devdir/preset" ]; then
-		echo "Cannot write $devdir/preset (try again; udev chmods this 0666 after bind)." >&2
+		echo "Cannot write $devdir/preset (check membership in the t150-control group)." >&2
 		exit 1
 	fi
 	if ! printf '%s\n' "$name" > "$devdir/preset"; then

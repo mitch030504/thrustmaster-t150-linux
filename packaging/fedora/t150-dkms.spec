@@ -5,11 +5,11 @@
 # This is a noarch source package; DKMS builds hid-t150.ko per kernel.
 
 Name:           t150-dkms
-Version:        1.1
-Release:        1%{?dist}
+Version:        1.2.0
+Release:        0.1%{?dist}
 Summary:        DKMS source for the Thrustmaster T150/TMX HID force-feedback driver
 License:        GPL-2.0-only
-URL:            https://github.com/sh4un-dot-com/t150_driver_x
+URL:            https://github.com/mitch030504/thrustmaster-t150-linux
 Source0:        t150-%{version}.tar.gz
 
 BuildArch:      noarch
@@ -47,7 +47,7 @@ install -d %{buildroot}%{_usrsrc}/t150-%{version}/build
 install -d %{buildroot}%{_usrsrc}/t150-%{version}/common
 install -m 644 hid-t150/*.c hid-t150/*.h hid-t150/Makefile \
         %{buildroot}%{_usrsrc}/t150-%{version}/hid-t150/
-install -m 644 common/t150_presets.h \
+install -m 644 common/t150_presets.h common/t150_controls.h \
         %{buildroot}%{_usrsrc}/t150-%{version}/common/
 install -m 644 dkms_make.mak %{buildroot}%{_usrsrc}/t150-%{version}/Makefile
 install -m 644 dkms.conf %{buildroot}%{_usrsrc}/t150-%{version}/
@@ -65,14 +65,20 @@ install -D -m 644 files/etc/modprobe.d/hid-t150.conf \
 install -D -m 644 files/etc/udev/rules.d/99-t150-defaults.rules \
         %{buildroot}%{_sysconfdir}/udev/rules.d/99-t150-defaults.rules
 
+install -D -m 644 files/etc/udev/rules.d/99-zz-t150-permissions.rules \
+        %{buildroot}%{_udevrulesdir}/99-zz-t150-permissions.rules
+install -D -m 644 files/usr/lib/sysusers.d/t150-control.conf \
+        %{buildroot}%{_sysusersdir}/t150-control.conf
+
 %post
+systemd-sysusers t150-control.conf
 dkms add -m t150 -v %{version} --rpm_safe_upgrade >/dev/null 2>&1 || :
 dkms build -m t150 -v %{version} >/dev/null 2>&1 || :
 dkms install -m t150 -v %{version} --force >/dev/null 2>&1 || :
 modprobe hid-t150 >/dev/null 2>&1 || :
 if command -v udevadm >/dev/null 2>&1; then
         udevadm control --reload >/dev/null 2>&1 || :
-        udevadm trigger --subsystem-match=hid >/dev/null 2>&1 || :
+        udevadm trigger --action=bind --subsystem-match=hid --sysname-match="0003:044F:B677.*" --sysname-match="0003:044F:B67F.*" >/dev/null 2>&1 || :
 fi
 if command -v restorecon >/dev/null 2>&1; then
         restorecon -F %{_prefix}/lib/udev/hid-t150-rebind \
@@ -109,6 +115,8 @@ fi
 %{_prefix}/lib/udev/hid-t150-rebind
 %{_bindir}/t150-preset
 %{_udevrulesdir}/10-t150.rules
+%{_udevrulesdir}/99-zz-t150-permissions.rules
+%{_sysusersdir}/t150-control.conf
 %{_modulesloaddir}/hid-t150.conf
 %{_modprobedir}/hid-t150.conf
 %config(noreplace) %{_sysconfdir}/udev/rules.d/99-t150-defaults.rules

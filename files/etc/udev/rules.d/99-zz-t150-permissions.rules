@@ -1,0 +1,2 @@
+# Run after Oversteer's permissions rules so wheel settings end up group-owned.
+ACTION=="add|bind", SUBSYSTEM=="hid", DRIVER=="hid-t150", RUN+="/usr/lib/udev/hid-t150-rebind %k --permissions"

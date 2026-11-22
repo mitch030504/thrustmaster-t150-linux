@@ -12,9 +12,11 @@
 #include <linux/spinlock.h>
 #include <linux/hid.h>
 #include <linux/string.h>
+#include <linux/unaligned.h>
 
 #include "hid-t150.h"
 #include "../common/t150_presets.h"
+#include "../common/t150_controls.h"
 #include "input.h"
 #include "attributes.h"
 #include "settings.h"
@@ -63,6 +65,10 @@ static int t150_constructor(struct t150 *t150, struct hid_device *hid_device)
 	hid_set_drvdata(hid_device, t150);
 
 	mutex_init(&t150->lock);
+	mutex_init(&t150->ff_io_lock);
+	t150->game_gain = U16_MAX;
+	t150->constant_level = 100;
+	t150->periodic_level = 100;
 	spin_lock_init(&t150->settings.access_lock);
 	spin_lock_init(&t150->ff_lock);
 	INIT_WORK(&t150->settings_refresh_work, t150_settings_refresh_work);
@@ -89,7 +95,9 @@ static int t150_constructor(struct t150 *t150, struct hid_device *hid_device)
 	if (!t150->usb_buf)
 		return -ENOMEM;
 
-	dev_set_drvdata(&t150->usb_device->dev, t150);
+	error_code = t150_setup_task(t150);
+	if (error_code)
+		goto err_buf;
 
 	error_code = hid_hw_start(hid_device, HID_CONNECT_DEFAULT & ~HID_CONNECT_FF);
 	if (error_code) {
@@ -109,7 +117,7 @@ static int t150_constructor(struct t150 *t150, struct hid_device *hid_device)
 	return 0;
 
 err_hw:
-	t150->gone = true;
+	WRITE_ONCE(t150->gone, true);
 	hid_hw_stop(hid_device);
 	t150_cancel_settings_refresh(t150);
 	t150_free_ffb(t150);
@@ -152,8 +160,9 @@ static void t150_remove(struct hid_device *hid_device)
 
 	hid_info(t150->hid_device, "T150RS Wheel removed. Bye\n");
 
-	t150->gone = true;
 	t150_free_attributes(t150);
+	t150_ff_quiesce(t150, true);
+	WRITE_ONCE(t150->gone, true);
 	hid_hw_stop(hid_device);
 	t150_cancel_settings_refresh(t150);
 	t150_free_ffb(t150);
@@ -170,6 +179,42 @@ static void t150_remove(struct hid_device *hid_device)
 #include "settings.c"
 #include "forcefeedback.c"
 
+static int t150_suspend(struct hid_device *hdev, pm_message_t message)
+{
+	struct t150 *t150 = hid_get_drvdata(hdev);
+
+	t150_ff_quiesce(t150, false);
+	WRITE_ONCE(t150->suspended, true);
+	t150_cancel_settings_refresh(t150);
+	return 0;
+}
+
+static int t150_resume(struct hid_device *hdev)
+{
+	struct t150 *t150 = hid_get_drvdata(hdev);
+	u16 range, gain, autocenter;
+	bool enable;
+	int ret;
+
+	t150_get_range(t150, &range);
+	t150_get_gain(t150, &gain);
+	t150_get_autocenter(t150, &autocenter);
+	t150_get_enable_autocenter(t150, &enable);
+	WRITE_ONCE(t150->suspended, false);
+	ret = t150_set_range(t150, range);
+	if (!ret)
+		ret = t150_set_gain(t150, gain);
+	if (!ret)
+		ret = t150_set_autocenter(t150, autocenter);
+	if (!ret)
+		ret = t150_set_enable_autocenter(t150, enable);
+	if (!ret)
+		WRITE_ONCE(t150->ff_paused, false);
+	else
+		WRITE_ONCE(t150->suspended, true);
+	return ret;
+}
+
 static const struct hid_device_id t150_table[] = {
 	{ HID_USB_DEVICE(USB_THRUSTMASTER_VENDOR_ID, USB_T150_PRODUCT_ID) },
 	{ HID_USB_DEVICE(USB_THRUSTMASTER_VENDOR_ID, USB_TMX_PRODUCT_ID) },
@@ -184,10 +229,13 @@ static struct hid_driver t150_driver = {
 	.remove = t150_remove,
 	.raw_event = t150_update_input,
 	.input_configured = t150_input_configured,
+	.suspend = t150_suspend,
+	.resume = t150_resume,
+	.reset_resume = t150_resume,
 };
 module_hid_driver(t150_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Dario Pagani <>");
 MODULE_DESCRIPTION("ThrustMaster T150 steering wheel driver");
-MODULE_VERSION("1.1");
+MODULE_VERSION("1.2.0");

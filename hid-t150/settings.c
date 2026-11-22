@@ -2,7 +2,7 @@
  * Send a packet on the interrupt OUT endpoint. The payload is copied into a
  * DMA-safe buffer; never pass stack addresses to usb_interrupt_msg().
  */
-static int t150_send_int(struct t150 *t150, const void *data, size_t len)
+static int t150_send_int_locked(struct t150 *t150, const void *data, size_t len)
 {
 	int actual = 0, ret;
 
@@ -11,17 +11,24 @@ static int t150_send_int(struct t150 *t150, const void *data, size_t len)
 	if (len > t150->usb_buf_size)
 		return -EINVAL;
 
-	mutex_lock(&t150->lock);
-	if (t150->gone) {
-		mutex_unlock(&t150->lock);
+	if (READ_ONCE(t150->gone) || READ_ONCE(t150->suspended))
 		return -ENODEV;
-	}
 
 	memcpy(t150->usb_buf, data, len);
 	ret = usb_interrupt_msg(t150->usb_device, t150->pipe_out,
-				t150->usb_buf, (int)len, &actual, T150_USB_TIMEOUT);
-	mutex_unlock(&t150->lock);
+				t150->usb_buf, (int)len, &actual, 100);
+	if (!ret && actual != len)
+		return -EREMOTEIO;
+	return ret;
+}
 
+static int t150_send_int(struct t150 *t150, const void *data, size_t len)
+{
+	int ret;
+
+	mutex_lock(&t150->lock);
+	ret = t150_send_int_locked(t150, data, len);
+	mutex_unlock(&t150->lock);
 	return ret;
 }
 
@@ -30,16 +37,24 @@ static int t150_send_int(struct t150 *t150, const void *data, size_t len)
  * @param gain a value between 0x00 and 0xffff where 0xffff is 100% gain
  * @return 0 on success @see usb_interrupt_msg for return codes
  */
+static int t150_send_gain(struct t150 *t150, u16 limit, u16 game)
+{
+	struct ff_change_gain buffer = {
+		.f0 = 0x43,
+		.gain = cpu_to_le16(DIV_ROUND_CLOSEST((u32)limit * game, (u32)U16_MAX)),
+	};
+
+	return t150_send_int(t150, &buffer, sizeof(buffer));
+}
+
 static int t150_set_gain(struct t150 *t150, uint16_t gain)
 {
 	int errno;
-	struct ff_change_gain buffer;
 	unsigned long flags;
 
-	buffer.f0 = 0x43;
-	buffer.gain = cpu_to_le16(gain);
-
-	errno = t150_send_int(t150, &buffer, sizeof(buffer));
+	mutex_lock(&t150->ff_io_lock);
+	errno = t150->ff_fault && gain ? -EIO :
+		t150_send_gain(t150, gain, t150->game_gain);
 	if (!errno) {
 		spin_lock_irqsave(&t150->settings.access_lock, flags);
 		t150->settings.gain = gain;
@@ -49,6 +64,7 @@ static int t150_set_gain(struct t150 *t150, uint16_t gain)
 	} else {
 		hid_err(t150->hid_device, "set gain failed: %d\n", errno);
 	}
+	mutex_unlock(&t150->ff_io_lock);
 
 	return errno;
 }
@@ -151,7 +167,7 @@ static int t150_read_settings(struct t150 *t150)
 		return -ENODEV;
 
 	mutex_lock(&t150->lock);
-	if (t150->gone) {
+	if (READ_ONCE(t150->gone) || READ_ONCE(t150->suspended)) {
 		mutex_unlock(&t150->lock);
 		return -ENODEV;
 	}
@@ -173,7 +189,7 @@ static int t150_read_settings(struct t150 *t150)
 
 	spin_lock_irq(&t150->settings.access_lock);
 	t150->settings.firmware_version = buf[1];
-	if (ret >= 8) {
+	if (ret >= 8 && !t150->settings.cache_valid) {
 		t150->settings.gain = make_word(buf[2], buf[3]);
 		t150->settings.autocenter_force = make_word(buf[4], buf[5]);
 		t150->settings.range = make_word(buf[6], buf[7]);
@@ -230,17 +246,17 @@ static void t150_settings_refresh_work(struct work_struct *work)
 	struct t150 *t150 = container_of(work, struct t150, settings_refresh_work);
 	int ret;
 
-	if (t150->gone)
+	if (READ_ONCE(t150->gone) || READ_ONCE(t150->suspended))
 		return;
 
-	ret = t150_refresh_settings_cached(t150, true);
+	ret = t150_refresh_settings_cached(t150, false);
 	if (ret < 0)
 		hid_warn(t150->hid_device, "unable to refresh wheel settings: %d\n", ret);
 }
 
 static void t150_schedule_settings_refresh(struct t150 *t150)
 {
-	if (!t150->gone)
+	if (!READ_ONCE(t150->gone) && !READ_ONCE(t150->suspended))
 		schedule_work(&t150->settings_refresh_work);
 }
 
@@ -333,8 +349,8 @@ static int t150_apply_preset(struct t150 *t150, const struct t150_preset *preset
 	if (errno)
 		return errno;
 
-	t150->spring_level = preset->spring_level;
-	t150->damper_level = preset->damper_level;
+	WRITE_ONCE(t150->spring_level, preset->spring_level);
+	WRITE_ONCE(t150->damper_level, preset->damper_level);
 	t150_ff_resubmit_condition_effects(t150, FF_SPRING);
 	t150_ff_resubmit_condition_effects(t150, FF_DAMPER);
 

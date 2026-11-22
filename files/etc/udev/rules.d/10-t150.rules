@@ -1,12 +1,5 @@
-# Thrustmaster T150 / TMX: treat as a joystick and grant the active seat access
+# Model-specific paths also cover a wheel already switched by hid-thrustmaster.
 ACTION=="add", SUBSYSTEM=="input", ATTRS{idVendor}=="044f", ATTRS{idProduct}=="b677", ENV{ID_INPUT_JOYSTICK}="1", TAG+="uaccess"
 ACTION=="add", SUBSYSTEM=="input", ATTRS{idVendor}=="044f", ATTRS{idProduct}=="b67f", ENV{ID_INPUT_JOYSTICK}="1", TAG+="uaccess"
-
-# hid-generic matches every HID device. T150/TMX are not in the in-tree
-# HID_QUIRK_HAVE_SPECIAL_DRIVER list, so hid-generic binds first. Steal them.
-ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="hid-generic", KERNEL=="0003:044F:B677.*", RUN+="/usr/lib/udev/hid-t150-rebind %k"
-ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="hid-generic", KERNEL=="0003:044F:B67F.*", RUN+="/usr/lib/udev/hid-t150-rebind %k"
-
-# Sysfs knobs used by Oversteer (world-writable, same as hid-tmff2)
-ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="hid-t150", RUN+="/bin/sh -c 'chmod 0666 $sys$devpath/range $sys$devpath/gain $sys$devpath/autocenter $sys$devpath/enable_autocenter $sys$devpath/spring_level $sys$devpath/damper_level $sys$devpath/preset 2>/dev/null || true'"
-ACTION=="add", SUBSYSTEM=="hid", DRIVER=="hid-t150", RUN+="/bin/sh -c 'chmod 0666 $sys$devpath/range $sys$devpath/gain $sys$devpath/autocenter $sys$devpath/enable_autocenter $sys$devpath/spring_level $sys$devpath/damper_level $sys$devpath/preset 2>/dev/null || true'"
+ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="hid-generic", KERNEL=="0003:044F:B677.*", RUN+="/usr/lib/udev/hid-t150-rebind %k --udev"
+ACTION=="bind", SUBSYSTEM=="hid", DRIVER=="hid-generic", KERNEL=="0003:044F:B67F.*", RUN+="/usr/lib/udev/hid-t150-rebind %k --udev"

@@ -27,7 +27,7 @@ fi
 
 set -euo pipefail
 
-VERSION=1.1
+VERSION=1.2.0
 REBIND_HELPER=/usr/lib/udev/hid-t150-rebind
 
 cd "$SCRIPT_DIR"
@@ -58,7 +58,10 @@ print_linux_deps() {
 		;;
 	*" arch "*|*" cachyos "*|*" manjaro "*|*" endeavouros "*)
 		echo "On Arch / CachyOS:"
-		echo "  sudo pacman -S linux-headers gcc make   # or linux-cachyos-headers"
+		local package
+		package=$(cat "/lib/modules/$(uname -r)/pkgbase" 2>/dev/null || printf 'linux')
+		echo "Install the matching ${package}-headers package for $(uname -r)."
+		echo "If it is unavailable, boot an installed kernel that has matching headers."
 		echo "Optional: sudo pacman -S dkms"
 		;;
 	*" debian "*|*" ubuntu "*|*" linuxmint "*)
@@ -116,18 +119,28 @@ if [ ! -d "$KBUILD" ]; then
 	exit 1
 fi
 
-echo "==== UNLOADING OLD MODULE ===="
-rmmod hid_t150 2>/dev/null || true
+if { command -v pacman >/dev/null && pacman -Qo "$REBIND_HELPER" >/dev/null 2>&1; } ||
+   { command -v rpm >/dev/null && rpm -qf "$REBIND_HELPER" >/dev/null 2>&1; }; then
+	echo "Use the package manager to upgrade the existing package." >&2
+	exit 1
+fi
 
 install_udev_and_autoload() {
 	echo "==== INSTALLING UDEV RULES AND AUTOLOAD ===="
 	install -d /etc/udev/rules.d /etc/modules-load.d /etc/modprobe.d /usr/lib/udev
 	install -m 644 "$SCRIPT_DIR/files/etc/udev/rules.d/10-t150.rules" /etc/udev/rules.d/
-	install -m 644 "$SCRIPT_DIR/files/etc/udev/rules.d/99-t150-defaults.rules" /etc/udev/rules.d/
+	install -D -m 644 files/etc/udev/rules.d/99-zz-t150-permissions.rules /etc/udev/rules.d/99-zz-t150-permissions.rules
+	install -D -m 644 files/usr/lib/sysusers.d/t150-control.conf /usr/lib/sysusers.d/t150-control.conf
+	systemd-sysusers t150-control.conf
+	for conf in /etc/udev/rules.d/99-t150-defaults.rules /etc/modprobe.d/hid-t150.conf; do
+		[ -e "$conf" ] || install -m 644 "$SCRIPT_DIR/files$conf" "$conf"
+	done
 	install -m 644 "$SCRIPT_DIR/files/etc/modules-load.d/hid-t150.conf" /etc/modules-load.d/
-	install -m 644 "$SCRIPT_DIR/files/etc/modprobe.d/hid-t150.conf" /etc/modprobe.d/
 	install -m 755 "$SCRIPT_DIR/files/usr/lib/udev/hid-t150-rebind" "$REBIND_HELPER"
 	install -m 755 "$SCRIPT_DIR/files/usr/bin/t150-preset" /usr/bin/t150-preset
+	install -D -m 755 files/usr/bin/t150-control /usr/bin/t150-control
+	install -D -m 644 files/usr/share/applications/io.github.mitch030504.T150Control.desktop \
+		/usr/share/applications/io.github.mitch030504.T150Control.desktop
 	selinux_relabel
 	udevadm control --reload
 }
@@ -145,43 +158,37 @@ rebind_wheels() {
 }
 
 if command -v dkms >/dev/null 2>&1; then
-	echo "==== REMOVING OLD DKMS VERSIONS ===="
-	old_vers=$(dkms status 2>/dev/null | awk -F', ' '/^t150\// {split($1, parts, "/"); print parts[2]}' || true)
-	if [ -n "$old_vers" ]; then
-		IFS=$'\n'
-		for version in $old_vers
-		do
-			[ -n "$version" ] || continue
-			dkms remove -m t150 -v "$version" --all || true
-		done
-		unset IFS
-	fi
-
 	echo "==== CONFIG DKMS ===="
-	rm -rf "/usr/src/t150-$VERSION"
 	install -d "/usr/src/t150-$VERSION/hid-t150" "/usr/src/t150-$VERSION/build" \
 		"/usr/src/t150-$VERSION/common"
 
 	find hid-t150 -maxdepth 1 -type f \( -name '*.c' -o -name '*.h' -o -name 'Makefile' \) \
 		-exec cp -a {} "/usr/src/t150-$VERSION/hid-t150/" \;
-	cp ./common/t150_presets.h "/usr/src/t150-$VERSION/common/"
+	cp ./common/t150_*.h "/usr/src/t150-$VERSION/common/"
 	cp ./dkms_make.mak "/usr/src/t150-$VERSION/Makefile"
 	cp ./dkms.conf "/usr/src/t150-$VERSION/"
 
 	echo "==== DKMS ===="
-	dkms add -m t150 -v $VERSION --verbose
-	dkms build -m t150 -v $VERSION --verbose
-	dkms install -m t150 -v $VERSION --verbose
+	if ! dkms status -m t150 -v "$VERSION" | grep -q .; then
+		dkms add -m t150 -v "$VERSION" --verbose
+	fi
+	dkms build -m t150 -v "$VERSION" -k "$KVER" --force --verbose
+	dkms install -m t150 -v "$VERSION" -k "$KVER" --force --verbose
 else
 	echo "==== DKMS NOT FOUND, INSTALLING FOR CURRENT KERNEL ===="
 	make -C "$SCRIPT_DIR/hid-t150"
 	make -C "$SCRIPT_DIR/hid-t150" install
-	depmod -a
+	depmod -a "$KVER"
+	install -d /var/lib/t150-control
+	printf "%s\n" "$KVER" > /var/lib/t150-control/manual-kernel
 fi
 
 install_udev_and_autoload
 
 echo "==== LOADING hid-t150 ===="
+if [ -d /sys/module/hid_t150 ]; then
+	rmmod hid_t150
+fi
 modprobe hid_t150
 rebind_wheels
 shopt -s nullglob
@@ -193,6 +200,7 @@ shopt -u nullglob
 
 secure_boot_note
 
+echo "For settings access, add your account to group t150-control and sign in again."
 echo "Done. With the T150 in PS3 mode (or a TMX after init) check:"
 echo "  lsmod | grep hid_t150"
 echo "  ls -l /sys/bus/hid/drivers/hid-t150"

@@ -11,7 +11,36 @@ udev rebind off `hid-generic`, Fedora packaging, and a FreeBSD port.
 **This is not an official Thrustmaster driver.** There is no warranty.
 Loading it is at your own risk.
 
-## Tested status
+## Linux control panel development branch
+
+This fork adds a GTK 4 **T150 Control** app for the T150/T150RS. Its inputs
+page shows the wheel, pedals, D-pad, and buttons even when the wheel is
+bound to `hid-generic`. With `hid-t150` loaded it adds tuning, named local
+profiles, and short force tests selected from the effects the driver
+advertises. Firmware inspection recognizes a Windows executable and
+computes a SHA-256 fingerprint. Native update and recovery require
+protocol captures and successful recovery testing on a spare wheel.
+
+**Status.** This branch is for development testing. The Linux hardware
+matrix below describes the parent fork. See [TESTING.md](TESTING.md) for
+the acceptance procedure and the remaining release gates.
+
+On Arch/CachyOS, install the matching kernel headers and DKMS. Build both
+packages with `cd packaging/arch && makepkg` and install the resulting
+`t150-dkms` and `t150-control` packages together with `pacman -U`. For
+the direct install path below, install GTK 4, PyGObject, and python-evdev
+to run the panel. Then add the account that will tune the wheel to the
+dedicated group and sign in again:
+
+```sh
+sudo usermod -aG t150-control "$USER"
+t150-control
+```
+
+Use `t150-control --diagnose` to report binding and settings without
+starting a force test.
+
+## Parent fork tested status
 
 **Linux works.** It was installed, loaded, and used on this hardware:
 
@@ -210,16 +239,20 @@ Attributes live on the **HID** device, not the input node:
 hid-t150 0003:044F:B677.0028: T150/TMX wheel ready
 ```
 
-The kernel forbids world-writable `DEVICE_ATTR` modes, so the driver
-creates knobs as `0664` and udev chmods them to `0666` after bind.
-Oversteer can then write them as a normal user.
+The driver creates writable attributes as `0664`. A wheel-specific
+udev rule assigns them to the `t150-control` group after bind.
+Oversteer and the control panel use the same permissions.
 
 | Attribute | Values | Description |
 |-----------|--------|-------------|
 | `range` | 270–1080 (TMX max 900) | Wheel rotation in degrees |
-| `gain` | 0–65535 | Global FFB intensity |
+| `gain` | 0–65535 | User gain cap, multiplied by the game’s requested gain |
+| `constant_level` | 0–100 | Constant force strength |
+| `periodic_level` | 0–100 | Periodic force strength |
+| `boost` | 0 / 1 | Low-force boost for constant and periodic effects |
+| `combine_pedals` | 0 / 1 / 2 | Separate, accelerator plus brake, accelerator plus clutch on supported T150 reports |
 | `autocenter` | 0–65535 | Hardware spring-back strength |
-| `enable_autocenter` | `y` / `n` | Keep hardware autocenter while a game has the device open |
+| `enable_autocenter` | `y` / `n` | Use configured wheel centering, or let the game request centering |
 | `spring_level` | 0–100 | Scale applied to `FF_SPRING` |
 | `damper_level` | 0–100 | Scale applied to `FF_DAMPER` |
 | `preset` | name or `custom` | Apply a feel preset; reads back `custom` after a manual tweak |
@@ -262,8 +295,7 @@ t150-preset drift
 echo rally > /sys/bus/hid/devices/0003:044F:B677.*/preset
 ```
 
-udev chmods `preset` to `0666`, so a logged-in user can switch without
-root. Tweaking an individual knob (or Oversteer) leaves `preset` as
+Members of the `t150-control` group can switch presets when logged in. Tweaking an individual knob (or Oversteer) leaves `preset` as
 `custom`. Writing a name reapplies the whole set.
 
 Change the plug-in default with a module parameter or udev:

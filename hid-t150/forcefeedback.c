@@ -1,6 +1,6 @@
 static void t150_ff_schedule(struct t150 *t150)
 {
-	if (!t150->gone)
+	if (!READ_ONCE(t150->gone) && !READ_ONCE(t150->ff_paused))
 		schedule_work(&t150->ff_work);
 }
 
@@ -78,7 +78,7 @@ static inline int t150_init_ffb(struct t150 *t150)
 	if (!t150->ff_effects)
 		return -ENOMEM;
 
-	for (i = 0; i < t150_ffb_effects_length; i++)
+	for (i = 0; i < ARRAY_SIZE(t150_ffb_effects); i++)
 		set_bit(t150_ffb_effects[i], t150->joystick->ffbit);
 
 	errno = input_ff_create(t150->joystick, T150_FF_MAX_EFFECTS);
@@ -141,8 +141,8 @@ static void t150_ff_prepare_first(struct ff_first *ff_first, struct ff_effect *e
 	}
 }
 
-static void t150_ff_prepare_update(struct ff_update *ff_update, struct ff_effect *effect,
-				   uint8_t spring_level, uint8_t damper_level)
+static void t150_ff_prepare_update(struct t150 *t150, struct ff_update *ff_update,
+				   struct ff_effect *effect)
 {
 	int32_t level = 0;
 	uint8_t cond_level;
@@ -153,8 +153,11 @@ static void t150_ff_prepare_update(struct ff_update *ff_update, struct ff_effect
 	switch (effect->type) {
 	case FF_PERIODIC:
 		ff_update->effect_class = T150_FF_UPDATE_CODE_PERIODIC;
-		ff_update->effect.periodic.magnitude = word_high(effect->u.periodic.magnitude);
-		ff_update->effect.periodic.offset = word_high(effect->u.periodic.offset);
+		ff_update->effect.periodic.magnitude = word_high(t150_scale_force(
+			effect->u.periodic.magnitude, READ_ONCE(t150->periodic_level),
+			READ_ONCE(t150->boost)));
+		ff_update->effect.periodic.offset = word_high(t150_scale_force(
+			effect->u.periodic.offset, READ_ONCE(t150->periodic_level), false));
 		ff_update->effect.periodic.phase = t150_scale_phase(effect->u.periodic.phase);
 		ff_update->effect.periodic.period = cpu_to_le16(effect->u.periodic.period);
 		break;
@@ -162,10 +165,12 @@ static void t150_ff_prepare_update(struct ff_update *ff_update, struct ff_effect
 		ff_update->effect_class = T150_FF_UPDATE_CODE_CONSTANT;
 		level = effect->u.constant.level * fixp_sin16(effect->direction / (0xFFFF / 360)) * +1;
 		level >>= 15;
+		level = t150_scale_force(level, READ_ONCE(t150->constant_level),
+					 READ_ONCE(t150->boost));
 		ff_update->effect.constant.level = (level / 0x01ff);
 		break;
 	case FF_SPRING:
-		cond_level = spring_level;
+		cond_level = READ_ONCE(t150->spring_level);
 		ff_update->effect_class = T150_FF_UPDATE_CODE_CONDITION;
 		ff_update->effect.condition.right_coeff =
 			t150_scale_coeff(effect->u.condition[0].right_coeff, cond_level);
@@ -181,7 +186,7 @@ static void t150_ff_prepare_update(struct ff_update *ff_update, struct ff_effect
 			t150_scale_sat(effect->u.condition[0].left_saturation, 0x030c, cond_level);
 		break;
 	case FF_DAMPER:
-		cond_level = damper_level;
+		cond_level = READ_ONCE(t150->damper_level);
 		ff_update->effect_class = T150_FF_UPDATE_CODE_CONDITION;
 		ff_update->effect.condition.right_coeff =
 			t150_scale_coeff(effect->u.condition[0].right_coeff, cond_level);
@@ -254,51 +259,52 @@ static int t150_ff_send_upload(struct t150 *t150, struct t150_ff_effect *slot)
 	struct ff_first first_old = { 0 }, first_new = { 0 };
 	struct ff_update update_old = { 0 }, update_new = { 0 };
 	struct ff_commit commit_old = { 0 }, commit_new = { 0 };
-	int errno;
+	int errno = 0;
 
 	t150_ff_prepare_first(&first_new, &slot->effect);
-	t150_ff_prepare_update(&update_new, &slot->effect,
-			       t150->spring_level, t150->damper_level);
+	t150_ff_prepare_update(t150, &update_new, &slot->effect);
 	t150_ff_prepare_commit(&commit_new, &slot->effect);
 
 	if (slot->has_old) {
 		t150_ff_prepare_first(&first_old, &slot->old);
-		t150_ff_prepare_update(&update_old, &slot->old,
-				       t150->spring_level, t150->damper_level);
+		t150_ff_prepare_update(t150, &update_old, &slot->old);
 		t150_ff_prepare_commit(&commit_old, &slot->old);
 	}
 
+	mutex_lock(&t150->lock);
 	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
 	    memcmp(&first_old, &first_new, sizeof(first_new))) {
-		errno = t150_send_int(t150, &first_new, sizeof(first_new));
+		errno = t150_send_int_locked(t150, &first_new, sizeof(first_new));
 		if (errno) {
 			hid_err(t150->hid_device, "ffb first packet of effect %d failed: %d\n",
 				slot->effect.id, errno);
-			return errno;
+			goto out;
 		}
 	}
 
 	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
 	    memcmp(&update_old, &update_new, sizeof(update_new))) {
-		errno = t150_send_int(t150, &update_new, sizeof(update_new));
+		errno = t150_send_int_locked(t150, &update_new, sizeof(update_new));
 		if (errno) {
 			hid_err(t150->hid_device, "ffb update packet of effect %d failed: %d\n",
 				slot->effect.id, errno);
-			return errno;
+			goto out;
 		}
 	}
 
 	if (T150_FF_BLIND_UPLOAD || !slot->has_old ||
 	    memcmp(&commit_old, &commit_new, sizeof(commit_new))) {
-		errno = t150_send_int(t150, &commit_new, sizeof(commit_new));
+		errno = t150_send_int_locked(t150, &commit_new, sizeof(commit_new));
 		if (errno) {
 			hid_err(t150->hid_device, "ffb commit packet of effect %d failed: %d\n",
 				slot->effect.id, errno);
-			return errno;
+			goto out;
 		}
 	}
 
-	return 0;
+out:
+	mutex_unlock(&t150->lock);
+	return errno;
 }
 
 static int t150_ff_send_play(struct t150 *t150, int effect_id, int times)
@@ -318,33 +324,44 @@ static int t150_ff_send_play(struct t150 *t150, int effect_id, int times)
 	return errno;
 }
 
-static bool t150_ff_work_pending(struct t150 *t150)
+static int t150_ff_stop_effect(struct t150 *t150, int id)
 {
-	int id;
+	int ret = t150_ff_send_play(t150, id, 0);
 
-	if (t150->gain_pending || t150->autocenter_pending)
-		return true;
-
-	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
-		if (t150->ff_effects[id].upload_pending ||
-		    t150->ff_effects[id].play_pending)
-			return true;
+	if (ret && ret != -ENODEV && ret != -ESHUTDOWN) {
+		t150->ff_fault = true;
+		t150_send_gain(t150, 0, 0);
+		hid_err(t150->hid_device, "force stop failed, reconnect the wheel\n");
 	}
-	return false;
+	return ret;
 }
 
+/* ff_io_lock orders playback, erase and synchronous evdev uploads. */
 static void t150_ff_work(struct work_struct *work)
 {
 	struct t150 *t150 = container_of(work, struct t150, ff_work);
 	unsigned long flags;
-	int id;
-	bool gain_pending, ac_pending;
-	uint16_t gain, ac;
-	struct t150_ff_effect local;
-	bool do_upload, do_play;
+	int id, value;
+	u16 gain, ac, limit;
+	bool gain_pending, ac_pending, upload;
+	struct t150_ff_effect *slot;
 
-	if (t150->gone || !t150->ff_effects)
-		return;
+	mutex_lock(&t150->ff_io_lock);
+	if (READ_ONCE(t150->gone) || READ_ONCE(t150->ff_paused))
+		goto out;
+
+	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
+		slot = &t150->ff_effects[id];
+		spin_lock_irqsave(&t150->ff_lock, flags);
+		value = slot->stop_pending;
+		slot->stop_pending = false;
+		spin_unlock_irqrestore(&t150->ff_lock, flags);
+		if (value && slot->valid)
+			t150_ff_stop_effect(t150, id);
+	}
+
+	if (t150->ff_fault)
+		goto out;
 
 	spin_lock_irqsave(&t150->ff_lock, flags);
 	gain_pending = t150->gain_pending;
@@ -355,106 +372,183 @@ static void t150_ff_work(struct work_struct *work)
 	t150->autocenter_pending = false;
 	spin_unlock_irqrestore(&t150->ff_lock, flags);
 
-	if (gain_pending)
-		t150_set_gain(t150, gain);
+	if (gain_pending) {
+		t150_get_gain(t150, &limit);
+		if (!t150_send_gain(t150, limit, gain))
+			t150->game_gain = gain;
+	}
 
 	if (ac_pending) {
-		if (!ac) {
-			t150_set_enable_autocenter(t150, false);
-		} else {
-			t150_set_enable_autocenter(t150, true);
-			t150_set_autocenter(t150, ac);
-		}
+		bool wheel_centering;
+		t150_get_enable_autocenter(t150, &wheel_centering);
+		if (!wheel_centering &&
+		    (!ac || !t150_settings_set40(t150, SET40_RETURN_FORCE,
+						 DIV_ROUND_CLOSEST((u32)ac * 100, U16_MAX))))
+			t150_settings_set40(t150, SET40_USE_RETURN_FORCE, !!ac);
 	}
 
 	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
-		if (t150->gone)
-			return;
-
+		slot = &t150->ff_effects[id];
 		spin_lock_irqsave(&t150->ff_lock, flags);
-		do_upload = t150->ff_effects[id].upload_pending;
-		do_play = t150->ff_effects[id].play_pending;
-		if (do_upload || do_play)
-			local = t150->ff_effects[id];
-		t150->ff_effects[id].upload_pending = false;
-		t150->ff_effects[id].play_pending = false;
+		value = slot->play_pending && !slot->stop_pending ? slot->play_value : -1;
+		if (value >= 0)
+			slot->play_pending = false;
 		spin_unlock_irqrestore(&t150->ff_lock, flags);
 
-		if (do_upload)
-			t150_ff_send_upload(t150, &local);
-		if (do_play)
-			t150_ff_send_play(t150, id, local.play_value);
+		upload = slot->upload_pending;
+		slot->upload_pending = false;
+		if (slot->valid && upload && t150_ff_send_upload(t150, slot)) {
+			if (t150_ff_stop_effect(t150, id))
+				goto out;
+			slot->valid = false;
+		}
+		if (slot->valid && value >= 0 && !READ_ONCE(t150->ff_paused)) {
+			if (t150_ff_send_play(t150, id, value))
+				t150_ff_stop_effect(t150, id);
+			if (t150->ff_fault)
+				goto out;
+		}
 	}
-
-	spin_lock_irqsave(&t150->ff_lock, flags);
-	do_upload = t150_ff_work_pending(t150);
-	spin_unlock_irqrestore(&t150->ff_lock, flags);
-
-	if (do_upload)
-		t150_ff_schedule(t150);
+out:
+	mutex_unlock(&t150->ff_io_lock);
 }
 
 static void t150_ff_resubmit_condition_effects(struct t150 *t150, uint16_t type)
 {
-	unsigned long flags;
 	int id;
 
+	mutex_lock(&t150->ff_io_lock);
 	if (!t150->ff_effects)
-		return;
-
-	spin_lock_irqsave(&t150->ff_lock, flags);
+		goto out;
 	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
-		if (t150->ff_effects[id].effect.type == type) {
-			t150->ff_effects[id].has_old = false;
-			t150->ff_effects[id].upload_pending = true;
+		struct t150_ff_effect *slot = &t150->ff_effects[id];
+
+		if (slot->valid && slot->effect.type == type) {
+			slot->has_old = false;
+			slot->upload_pending = true;
 		}
 	}
-	spin_unlock_irqrestore(&t150->ff_lock, flags);
 	t150_ff_schedule(t150);
+out:
+	mutex_unlock(&t150->ff_io_lock);
 }
 
 static int t150_ff_upload(struct input_dev *dev, struct ff_effect *effect, struct ff_effect *old)
 {
 	struct t150 *t150 = input_get_drvdata(dev);
-	unsigned long flags;
-	struct ff_effect new_e = *effect;
-	struct ff_effect old_e;
+	struct t150_ff_effect next = { .effect = *effect };
+	struct t150_ff_effect *slot;
+	int ret;
 
-	if (!t150->ff_effects || effect->id < 0 || effect->id >= T150_FF_MAX_EFFECTS)
+	if (effect->id < 0 || effect->id >= T150_FF_MAX_EFFECTS)
 		return -EINVAL;
+	if (effect->type == FF_PERIODIC) {
+		u16 waveform = effect->u.periodic.waveform;
 
-	if (new_e.type == FF_PERIODIC && new_e.u.periodic.period == 0)
-		return -EINVAL;
+		if (!effect->u.periodic.period)
+			return -EINVAL;
+		if (waveform != FF_SINE && waveform != FF_SAW_UP && waveform != FF_SAW_DOWN)
+			return -EOPNOTSUPP;
+	}
+	t150_ff_rewrite_rumble(&next.effect);
 
-	t150_ff_rewrite_rumble(&new_e);
-	if (old) {
-		old_e = *old;
-		t150_ff_rewrite_rumble(&old_e);
-		if (!T150_FF_BLIND_COMPUTE_EFFECT &&
-		    memcmp(&new_e, &old_e, sizeof(new_e)) == 0)
-			return 0;
+	mutex_lock(&t150->ff_io_lock);
+	if (READ_ONCE(t150->gone) || READ_ONCE(t150->ff_paused)) {
+		ret = -ENODEV;
+		goto out;
 	}
 
-	spin_lock_irqsave(&t150->ff_lock, flags);
-	if (old) {
-		t150->ff_effects[effect->id].old = old_e;
-		t150->ff_effects[effect->id].has_old = true;
+	if (t150->ff_fault) {
+		ret = -EIO;
+		goto out;
+	}
+
+	slot = &t150->ff_effects[effect->id];
+	next.has_old = slot->valid && !slot->upload_pending;
+	next.old = slot->effect;
+	ret = t150_ff_send_upload(t150, &next);
+	if (ret) {
+		if (!t150_ff_stop_effect(t150, effect->id))
+			slot->valid = false;
 	} else {
-		t150->ff_effects[effect->id].has_old = false;
+		slot->effect = next.effect;
+		slot->upload_pending = false;
+		slot->has_old = false;
+		slot->valid = true;
 	}
-	t150->ff_effects[effect->id].effect = new_e;
-	t150->ff_effects[effect->id].upload_pending = true;
-	spin_unlock_irqrestore(&t150->ff_lock, flags);
-
-	t150_ff_schedule(t150);
-	return 0;
+out:
+	mutex_unlock(&t150->ff_io_lock);
+	return ret;
 }
 
 static int t150_ff_erase(struct input_dev *dev, int effect_id)
 {
-	/* Stopping the effect is already requested through t150_ff_play(times=0).
-	 * The wheel has no explicit destroy packet; free the id. */
-	return 0;
+	struct t150 *t150 = input_get_drvdata(dev);
+	struct t150_ff_effect *slot = &t150->ff_effects[effect_id];
+	unsigned long flags;
+	int ret = 0;
+
+	mutex_lock(&t150->ff_io_lock);
+	spin_lock_irqsave(&t150->ff_lock, flags);
+	slot->play_pending = false;
+	slot->stop_pending = false;
+	spin_unlock_irqrestore(&t150->ff_lock, flags);
+
+	if (slot->valid && !READ_ONCE(t150->gone) && !READ_ONCE(t150->ff_paused))
+		ret = t150_ff_stop_effect(t150, effect_id);
+	if (!ret)
+		slot->valid = false;
+	slot->upload_pending = false;
+	mutex_unlock(&t150->ff_io_lock);
+	return ret;
+}
+
+static int t150_ff_quiesce(struct t150 *t150, bool forget)
+{
+	unsigned long flags;
+	int id, ret = 0;
+
+	spin_lock_irqsave(&t150->ff_lock, flags);
+	if (t150->ff_paused || t150->gone || !t150->ff_effects) {
+		spin_unlock_irqrestore(&t150->ff_lock, flags);
+		return 0;
+	}
+	WRITE_ONCE(t150->ff_paused, true);
+	t150->gain_pending = false;
+	t150->autocenter_pending = false;
+	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
+		t150->ff_effects[id].play_pending = false;
+		t150->ff_effects[id].stop_pending = false;
+	}
+	spin_unlock_irqrestore(&t150->ff_lock, flags);
+
+	cancel_work_sync(&t150->ff_work);
+	mutex_lock(&t150->ff_io_lock);
+	for (id = 0; id < T150_FF_MAX_EFFECTS; id++) {
+		struct t150_ff_effect *slot = &t150->ff_effects[id];
+		int error;
+
+		if (slot->valid) {
+			error = t150_ff_stop_effect(t150, id);
+			if (error && !ret)
+				ret = error;
+		}
+		slot->valid = slot->valid && !forget;
+		slot->upload_pending = slot->valid;
+		slot->has_old = false;
+	}
+	t150->game_gain = U16_MAX;
+	if (forget && !t150->ff_fault) {
+		bool enable;
+		u16 autocenter;
+
+		t150_get_enable_autocenter(t150, &enable);
+		t150_get_autocenter(t150, &autocenter);
+		t150_set_autocenter(t150, autocenter);
+		t150_set_enable_autocenter(t150, enable);
+	}
+	mutex_unlock(&t150->ff_io_lock);
+	return ret;
 }
 
 static int t150_ff_play(struct input_dev *dev, int effect_id, int value)
@@ -462,15 +556,20 @@ static int t150_ff_play(struct input_dev *dev, int effect_id, int value)
 	struct t150 *t150 = input_get_drvdata(dev);
 	unsigned long flags;
 
-	if (!t150->ff_effects || effect_id < 0 || effect_id >= T150_FF_MAX_EFFECTS)
+	if (effect_id < 0 || effect_id >= T150_FF_MAX_EFFECTS || value < 0)
 		return -EINVAL;
 
 	spin_lock_irqsave(&t150->ff_lock, flags);
-	t150->ff_effects[effect_id].play_value = value;
-	t150->ff_effects[effect_id].play_pending = true;
-	spin_unlock_irqrestore(&t150->ff_lock, flags);
+	if (!t150->ff_paused && !t150->gone) {
+		struct t150_ff_effect *slot = &t150->ff_effects[effect_id];
 
-	t150_ff_schedule(t150);
+		if (!value)
+			slot->stop_pending = true;
+		slot->play_value = value;
+		slot->play_pending = !!value;
+		t150_ff_schedule(t150);
+	}
+	spin_unlock_irqrestore(&t150->ff_lock, flags);
 	return 0;
 }
 
@@ -480,17 +579,12 @@ static void t150_ff_set_gain(struct input_dev *dev, uint16_t gain)
 	unsigned long flags;
 
 	spin_lock_irqsave(&t150->ff_lock, flags);
-	t150->pending_gain = gain;
-	t150->gain_pending = true;
+	if (!t150->ff_paused && !t150->gone) {
+		t150->pending_gain = gain;
+		t150->gain_pending = true;
+		t150_ff_schedule(t150);
+	}
 	spin_unlock_irqrestore(&t150->ff_lock, flags);
-
-	spin_lock_irqsave(&t150->settings.access_lock, flags);
-	t150->settings.gain = gain;
-	t150->settings.cache_valid = true;
-	t150->settings.cache_updated_jiffies = jiffies;
-	spin_unlock_irqrestore(&t150->settings.access_lock, flags);
-
-	t150_ff_schedule(t150);
 }
 
 static void t150_ff_set_autocenter(struct input_dev *dev, uint16_t value)
@@ -499,9 +593,10 @@ static void t150_ff_set_autocenter(struct input_dev *dev, uint16_t value)
 	unsigned long flags;
 
 	spin_lock_irqsave(&t150->ff_lock, flags);
-	t150->pending_autocenter = value;
-	t150->autocenter_pending = true;
+	if (!t150->ff_paused && !t150->gone) {
+		t150->pending_autocenter = value;
+		t150->autocenter_pending = true;
+		t150_ff_schedule(t150);
+	}
 	spin_unlock_irqrestore(&t150->ff_lock, flags);
-
-	t150_ff_schedule(t150);
 }

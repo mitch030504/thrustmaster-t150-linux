@@ -1,0 +1,29 @@
+name: Linux driver checks
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      matrix:
+        headers: [linux-lts-headers, linux-headers]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain and headers
+        run: pacman -Syu --noconfirm ${{ matrix.headers }} python-evdev systemd
+      - name: Run host tests
+        run: make test
+      - name: Build using the DKMS entry point
+        run: |
+          for headers in /usr/lib/modules/*/build; do
+            make -f dkms_make.mak KDIR="$headers" clean
+            make -f dkms_make.mak KDIR="$headers" all
+            test -s build/hid-t150.ko
+          done
+      - name: Check scripts and udev rules
+        run: |
+          for script in install.sh uninstall.sh packaging/arch/PKGBUILD; do
+            bash -n "$script"
+          done
+          sh -n files/usr/lib/udev/hid-t150-rebind
+          udevadm verify files/etc/udev/rules.d/10-t150.rules files/etc/udev/rules.d/99-zz-t150-permissions.rules
