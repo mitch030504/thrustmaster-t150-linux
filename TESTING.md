@@ -37,10 +37,15 @@ real wheel, or capture replay.
    brake, and the remaining pedal active if attached. Restore separate
    mode after the check. Test shorter rotation ranges on hardware
    before exposing them.
-3. Start with the panel's 5% tests. Check both directions of constant
-   force and every advertised waveform and condition. Verify that
-   Stop, closing the panel, and switching focus stop the effect.
-   Check zero gain and a small gain increase before higher forces.
+3. Start with Sine at low strength. With the rim clear, increase
+   Sine to 50% if the movement is too small to see. The one-second
+   107 ms-period sine at 50% was verified through evdev on a T150RS
+   with firmware 35 and CachyOS 7.4.0-rc3-1. It produced 18 steering
+   reversals and a span of 443 counts, with zero movement at idle.
+   Check both directions of constant force and the other advertised
+   waveforms separately. Evaluate spring and damper as resistance
+   when turning the rim. Verify that Stop, closing the panel, and
+   switching focus stop an active effect.
 4. Exercise upload, play, stop, update, and erase in all nine slots.
    Stop while an update is queued and check that it stays stopped.
    Check removal, unplug/replug, and suspend/resume for stale effects.

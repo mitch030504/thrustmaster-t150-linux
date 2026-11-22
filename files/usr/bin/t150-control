@@ -70,18 +70,25 @@ def save_profile(path, values):
             temporary.unlink(missing_ok=True)
 
 
+def max_test_strength(name):
+    return 50 if name == "Sine" else 10
+
+
 def build_effect(name, percent):
-    if not 1 <= percent <= 10:
-        raise ValueError("Test strength must be between 1% and 10%")
+    maximum = max_test_strength(name)
+    if not 1 <= percent <= maximum:
+        raise ValueError(f"Test strength must be between 1% and {maximum}%")
     kind, option = TESTS[name]
-    level = 32767 * percent // 100
+    level = 32768 * percent // 100
+    duration = 1000 if name == "Sine" else 500
     direction = 0x4000
     if kind == e.FF_CONSTANT:
         direction = option
         data = ff.EffectType(ff_constant_effect=ff.Constant(level, ff.Envelope()))
     elif kind == e.FF_PERIODIC:
-        data = ff.EffectType(ff_periodic_effect=ff.Periodic(option, 125, level, 0, 0,
-                                                             ff.Envelope(), 0, None))
+        period = 107 if option == e.FF_SINE else 125
+        data = ff.EffectType(ff_periodic_effect=ff.Periodic(option, period, level, 0, 0,
+                                                           ff.Envelope(), 0, None))
     elif kind == e.FF_RAMP:
         data = ff.EffectType(ff_ramp_effect=ff.Ramp(0, level, ff.Envelope()))
     elif kind == e.FF_RUMBLE:
@@ -89,7 +96,7 @@ def build_effect(name, percent):
     else:
         condition = ff.Condition(level, level, level, level, 0, 0)
         data = ff.EffectType(ff_condition_effect=(ff.Condition * 2)(condition, ff.Condition()))
-    return ff.Effect(kind, -1, direction, ff.Trigger(), ff.Replay(500, 0), data)
+    return ff.Effect(kind, -1, direction, ff.Trigger(), ff.Replay(duration, 0), data)
 
 
 def launch():
@@ -126,13 +133,16 @@ def launch():
             force = self.page("forces", "Forces")
             self.force_choice = Gtk.DropDown.new_from_strings([])
             self.force_names = []
-            self.strength = Gtk.SpinButton.new_with_range(1, 10, 1)
+            self.strength = Gtk.SpinButton.new_with_range(1, max_test_strength(""), 1)
             self.strength.set_value(5)
             self.strength.set_tooltip_text("Test strength in percent")
-            self.test_button = self.button("Play 500 ms test", self.play)
+            self.force_choice.connect("notify::selected", self.update_test_strength)
+            self.test_button = self.button("Play force test", self.play)
             self.stop_button = self.button("Stop", self.stop)
             for widget in (Gtk.Label(label="Test strength (%)", xalign=0), self.strength,
-                           self.force_choice, self.test_button, self.stop_button):
+                           self.force_choice,
+                           Gtk.Label(label="Keep the rim clear before playing a force test.", xalign=0, wrap=True),
+                           self.test_button, self.stop_button):
                 force.append(widget)
 
             self.tuning = self.page("tuning", "Tuning")
@@ -404,15 +414,21 @@ def launch():
             except (OSError, ValueError) as exc:
                 self.status.set_text(str(exc))
 
+        def update_test_strength(self, *_):
+            index = self.force_choice.get_selected()
+            name = self.force_names[index] if index < len(self.force_names) else ""
+            self.strength.set_range(1, max_test_strength(name))
+
         def play(self, *_):
             self.stop()
             try:
                 name = self.force_names[self.force_choice.get_selected()]
+                self.strength.update()
                 effect = build_effect(name, self.strength.get_value_as_int())
                 self.effect_id = self.device.upload_effect(effect)
                 self.device.write(e.EV_FF, self.effect_id, 1)
                 self.stop_button.set_sensitive(True)
-                self.test_timer = GLib.timeout_add(550, self.end_test)
+                self.test_timer = GLib.timeout_add(effect.ff_replay.length + 50, self.end_test)
             except (OSError, ValueError, IndexError) as exc:
                 self.stop()
                 self.status.set_text(f"Force test failed. {exc}")
