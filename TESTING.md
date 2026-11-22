@@ -37,8 +37,9 @@ real wheel, or capture replay.
    brake, and the remaining pedal active if attached. Restore separate
    mode after the check. Test shorter rotation ranges on hardware
    before exposing them.
-3. Start with Sine at low strength. With the rim clear, increase
-   Sine to 50% if the movement is too small to see. The one-second
+3. Start with Sine at low strength. If the movement is too small to
+   see, center the wheel, keep the rim clear, and choose **Play 50%
+   sine for 1 second**. The one-second
    107 ms-period sine at 50% was verified through evdev on a T150RS
    with firmware 35 and CachyOS 7.4.0-rc3-1. It produced 18 steering
    reversals and a span of 443 counts, with zero movement at idle.

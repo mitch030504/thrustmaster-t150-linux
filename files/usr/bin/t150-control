@@ -14,6 +14,8 @@ from evdev import InputDevice, ecodes as e, ff
 
 HID_PATH = Path("/sys/bus/hid/devices")
 FIRMWARE_PAGE = "https://support.thrustmaster.com/en/product/t150ffb-en/"
+TEST_MAX_PERCENT = 10
+REFERENCE_SINE_PERCENT = 50
 LIMITS = {
     "range": (270, 1080), "gain": (0, 65535), "autocenter": (0, 65535),
     "enable_autocenter": (0, 1), "constant_level": (0, 100), "periodic_level": (0, 100),
@@ -70,12 +72,8 @@ def save_profile(path, values):
             temporary.unlink(missing_ok=True)
 
 
-def max_test_strength(name):
-    return 50 if name == "Sine" else 10
-
-
 def build_effect(name, percent):
-    maximum = max_test_strength(name)
+    maximum = REFERENCE_SINE_PERCENT if name == "Sine" else TEST_MAX_PERCENT
     if not 1 <= percent <= maximum:
         raise ValueError(f"Test strength must be between 1% and {maximum}%")
     kind, option = TESTS[name]
@@ -133,16 +131,16 @@ def launch():
             force = self.page("forces", "Forces")
             self.force_choice = Gtk.DropDown.new_from_strings([])
             self.force_names = []
-            self.strength = Gtk.SpinButton.new_with_range(1, max_test_strength(""), 1)
+            self.strength = Gtk.SpinButton.new_with_range(1, TEST_MAX_PERCENT, 1)
             self.strength.set_value(5)
             self.strength.set_tooltip_text("Test strength in percent")
-            self.force_choice.connect("notify::selected", self.update_test_strength)
             self.test_button = self.button("Play force test", self.play)
+            self.reference_test = self.button("Play 50% sine for 1 second", self.prepare_reference_sine)
             self.stop_button = self.button("Stop", self.stop)
             for widget in (Gtk.Label(label="Test strength (%)", xalign=0), self.strength,
                            self.force_choice,
                            Gtk.Label(label="Keep the rim clear before playing a force test.", xalign=0, wrap=True),
-                           self.test_button, self.stop_button):
+                           self.test_button, self.reference_test, self.stop_button):
                 force.append(widget)
 
             self.tuning = self.page("tuning", "Tuning")
@@ -208,6 +206,7 @@ def launch():
             self.preset.set_model(Gtk.StringList.new([]))
             self.force_choice.set_model(Gtk.StringList.new([]))
             self.test_button.set_sensitive(False)
+            self.reference_test.set_sensitive(False)
             self.stop_button.set_sensitive(False)
             self.firmware_version.set_text("Firmware version unavailable.")
             if self.wheel is None:
@@ -234,6 +233,7 @@ def launch():
                                         if kind in caps and (kind != e.FF_PERIODIC or option in caps)]
                 self.force_choice.set_model(Gtk.StringList.new(self.force_names))
                 self.test_button.set_sensitive(bool(self.force_names))
+                self.reference_test.set_sensitive("Sine" in self.force_names and e.FF_GAIN in caps)
                 self.status.set_text(f"{self.device.name} · {driver}" +
                                      (" · force feedback unavailable" if not self.force_names else ""))
                 if self.settings and not os.access(self.wheel / "gain", os.W_OK):
@@ -414,22 +414,53 @@ def launch():
             except (OSError, ValueError) as exc:
                 self.status.set_text(str(exc))
 
-        def update_test_strength(self, *_):
-            index = self.force_choice.get_selected()
-            name = self.force_names[index] if index < len(self.force_names) else ""
-            self.strength.set_range(1, max_test_strength(name))
-
         def play(self, *_):
             self.stop()
             try:
                 name = self.force_names[self.force_choice.get_selected()]
                 self.strength.update()
                 effect = build_effect(name, self.strength.get_value_as_int())
+            except (ValueError, IndexError) as exc:
+                self.status.set_text(f"Force test failed. {exc}")
+            else:
+                self.play_effect(effect)
+
+        def prepare_reference_sine(self, *_):
+            self.stop()
+            if self.device is None:
+                return
+            try:
+                axis = self.device.absinfo(e.ABS_X)
+                if axis is None or axis.max <= axis.min:
+                    self.status.set_text("Steering position is unavailable.")
+                    return
+                if abs(2 * axis.value - axis.max - axis.min) > (axis.max - axis.min) // 2:
+                    self.status.set_text("Center the wheel before the 50% sine test.")
+                    return
+                self.device.write(e.EV_FF, e.FF_GAIN, 65535)
+            except OSError as exc:
+                self.status.set_text(f"Force test failed. {exc}")
+                return
+
+            self.status.set_text("Starting the one-second sine test. Keep the rim clear.")
+            self.stop_button.set_sensitive(True)
+            self.test_timer = GLib.timeout_add(500, self.start_reference_sine)
+
+        def start_reference_sine(self):
+            self.test_timer = None
+            self.play_effect(build_effect("Sine", REFERENCE_SINE_PERCENT))
+            return False
+
+        def play_effect(self, effect):
+            if self.device is None:
+                return
+            try:
                 self.effect_id = self.device.upload_effect(effect)
                 self.device.write(e.EV_FF, self.effect_id, 1)
+                self.status.set_text("Force test playing.")
                 self.stop_button.set_sensitive(True)
                 self.test_timer = GLib.timeout_add(effect.ff_replay.length + 50, self.end_test)
-            except (OSError, ValueError, IndexError) as exc:
+            except OSError as exc:
                 self.stop()
                 self.status.set_text(f"Force test failed. {exc}")
 
@@ -439,6 +470,8 @@ def launch():
             return False
 
         def stop(self, *_):
+            if self.effect_id is not None or getattr(self, "test_timer", None):
+                self.status.set_text("Force test stopped.")
             if getattr(self, "test_timer", None):
                 GLib.source_remove(self.test_timer)
                 self.test_timer = None
