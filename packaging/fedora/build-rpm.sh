@@ -6,7 +6,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
-VERSION=1.1
+VERSION=1.2.0
 NAME="t150-$VERSION"
 
 if ! command -v rpmbuild >/dev/null 2>&1; then
@@ -20,7 +20,7 @@ trap 'rm -rf "$TOP"' EXIT
 mkdir -p "$TOP/$NAME/hid-t150" "$TOP/$NAME/files" "$TOP/$NAME/common"
 cp -a "$ROOT/hid-t150/"*.c "$ROOT/hid-t150/"*.h "$ROOT/hid-t150/Makefile" \
 	"$TOP/$NAME/hid-t150/"
-cp -a "$ROOT/common/t150_presets.h" "$TOP/$NAME/common/"
+cp -a "$ROOT/common/"t150_*.h "$TOP/$NAME/common/"
 cp -a "$ROOT/dkms.conf" "$ROOT/dkms_make.mak" "$ROOT/LICENSE" "$ROOT/README.md" \
 	"$TOP/$NAME/"
 cp -a "$ROOT/files/etc" "$ROOT/files/usr" "$TOP/$NAME/files/"

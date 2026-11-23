@@ -31,47 +31,49 @@ if [ "${EUID}" -ne 0 ]; then
 	exit 1
 fi
 
-rmmod hid_t150 2>/dev/null || true
-
-if command -v dkms >/dev/null 2>&1; then
-	old_vers=$(dkms status 2>/dev/null | awk -F', ' '/^t150\// {split($1, parts, "/"); print parts[2]}' || true)
-	if [ -n "$old_vers" ]; then
-		IFS=$'\n'
-		for version in $old_vers
-		do
-			[ -n "$version" ] || continue
-			dkms remove -m t150 -v "$version" --all || true
-		done
-		unset IFS
-	fi
-	rm -rf /usr/src/t150-*
+VERSION=1.2.0
+helper=/usr/lib/udev/hid-t150-rebind
+if { command -v pacman >/dev/null && pacman -Qo "$helper" >/dev/null 2>&1; } ||
+   { command -v rpm >/dev/null && rpm -qf "$helper" >/dev/null 2>&1; }; then
+	echo "Remove the installed package through the package manager." >&2
+	exit 1
 fi
 
-rm -f /etc/udev/rules.d/10-t150.rules \
-	/etc/udev/rules.d/99-t150-defaults.rules \
-	/etc/modules-load.d/hid-t150.conf \
-	/etc/modprobe.d/hid-t150.conf \
-	/usr/lib/udev/hid-t150-rebind \
-	/usr/bin/t150-preset
+rm -f /etc/udev/rules.d/10-t150.rules /etc/udev/rules.d/99-zz-t150-permissions.rules \
+	/etc/modules-load.d/hid-t150.conf
+udevadm control --reload
+if [ -d /sys/module/hid_t150 ]; then
+	rmmod hid_t150
+fi
 
-# Package-owned copies from the Fedora RPM
-rm -f /usr/lib/udev/rules.d/10-t150.rules \
-	/usr/lib/modules-load.d/hid-t150.conf \
-	/usr/lib/modprobe.d/hid-t150.conf
+if command -v dkms >/dev/null && dkms status -m t150 -v "$VERSION" | grep -q .; then
+	dkms remove -m t150 -v "$VERSION" --all
+fi
+for file in /usr/src/t150-"$VERSION"/hid-t150/* /usr/src/t150-"$VERSION"/common/* \
+	/usr/src/t150-"$VERSION"/dkms.conf /usr/src/t150-"$VERSION"/Makefile; do
+	[ ! -f "$file" ] || rm "$file"
+done
+rmdir /usr/src/t150-"$VERSION"/{hid-t150,build,common} /usr/src/t150-"$VERSION" 2>/dev/null || true
 
-# Current-kernel extra module from `make install` (plain or zstd-compressed)
-KVER=$(uname -r)
-rm -f "/lib/modules/$KVER/extra/hid-t150/hid-t150.ko" \
-	"/lib/modules/$KVER/extra/hid-t150/hid-t150.ko.zst" \
-	"/lib/modules/$KVER/extra/hid-t150.ko" \
-	"/lib/modules/$KVER/extra/hid-t150.ko.zst" \
-	"/lib/modules/$KVER/updates/dkms/hid-t150.ko" \
-	"/lib/modules/$KVER/updates/dkms/hid-t150.ko.zst" \
-	"/lib/modules/$KVER/kernel/drivers/input/joystick/hid-t150.ko" \
-	"/lib/modules/$KVER/kernel/drivers/input/joystick/hid-t150.ko.zst"
-rmdir "/lib/modules/$KVER/extra/hid-t150" 2>/dev/null || true
-depmod -a "$KVER" || true
+marker=/var/lib/t150-control/manual-kernel
+if [ -f "$marker" ]; then
+	kernel=$(cat "$marker")
+	if [[ "$kernel" =~ ^[a-zA-Z0-9._+-]+$ ]]; then
+		for suffix in '' .zst .xz .gz; do
+			rm -f "/lib/modules/$kernel/extra/hid-t150/hid-t150.ko$suffix"
+		done
+		depmod -a "$kernel"
+	fi
+	rm "$marker"
+fi
 
-udevadm control --reload || true
+rm -f "$helper" /usr/bin/t150-preset /usr/bin/t150-control \
+	/usr/share/applications/io.github.mitch030504.T150Control.desktop \
+	/usr/lib/sysusers.d/t150-control.conf
 
-echo "hid-t150 uninstalled."
+modprobe hid-generic
+shopt -s nullglob
+for dev in /sys/bus/hid/devices/0003:044F:B677.* /sys/bus/hid/devices/0003:044F:B67F.*; do
+	[ -L "$dev/driver" ] || printf '%s' "${dev##*/}" > /sys/bus/hid/drivers/hid-generic/bind
+done
+echo "hid-t150 uninstalled. Wheel settings and profiles were preserved."

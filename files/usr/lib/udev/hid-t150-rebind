@@ -1,40 +1,57 @@
 #!/bin/sh
-# Steal a T150/TMX hid device from hid-generic and bind hid-t150.
-# Called from udev as: hid-t150-rebind %k
-# or from install.sh with the hid kernel name (0003:044F:B677.xxxx).
-
+# SPDX-License-Identifier: GPL-2.0-only
 set -eu
 
-dev=${1:-}
-if [ -z "$dev" ]; then
-	echo "usage: hid-t150-rebind HID_KERNEL_NAME" >&2
-	exit 2
+device=${1:-}
+mode=${2:-}
+if ! printf '%s\n' "$device" | grep -Eq '^0003:044F:(B677|B67F)\.[0-9A-Fa-f]+$'; then
+    echo "Expected the HID name of a native T150 or TMX." >&2
+    exit 2
 fi
 
-modprobe hid-t150 2>/dev/null || true
+hid=/sys/bus/hid
+path=$hid/devices/$device
+generic=$hid/drivers/hid-generic
+driver=$hid/drivers/hid-t150
+test -d "$path" || exit 1
 
-if [ ! -d /sys/bus/hid/drivers/hid-t150 ]; then
-	echo "hid-t150 is not loaded" >&2
-	exit 1
+if [ "$mode" = --permissions ]; then
+    test -e "$driver/$device" || exit 1
+    for attr in range gain autocenter enable_autocenter constant_level periodic_level \
+        spring_level damper_level boost combine_pedals preset; do
+        [ -e "$path/$attr" ] || continue
+        # Restrict even when an existing Oversteer rule granted global access.
+        chmod 0644 "$path/$attr"
+        chgrp t150-control "$path/$attr"
+        chmod 0664 "$path/$attr"
+    done
+    exit 0
 fi
 
-if [ ! -e "/sys/bus/hid/devices/$dev" ]; then
-	echo "no such hid device: $dev" >&2
-	exit 1
+install -d -m 0700 /run/hid-t150
+exec 9>"/run/hid-t150/$device.lock"
+flock 9
+failed=/run/hid-t150/$device.failed
+if [ "$mode" = --udev ] && [ -e "$failed" ]; then
+    exit 0
 fi
-
-if [ -e "/sys/bus/hid/drivers/hid-t150/$dev" ]; then
-	exit 0
+if [ -e "$driver/$device" ]; then
+    exit 0
 fi
+modprobe hid-t150
+test -d "$driver"
 
-if [ -e "/sys/bus/hid/drivers/hid-generic/$dev" ]; then
-	printf '%s' "$dev" > /sys/bus/hid/drivers/hid-generic/unbind
+if [ -e "$generic/$device" ]; then
+    printf '%s' "$device" > "$generic/unbind"
+elif [ -L "$path/driver" ]; then
+    echo "$device already has a specialized driver." >&2
+    exit 1
 fi
-
-if ! printf '%s' "$dev" > /sys/bus/hid/drivers/hid-t150/bind; then
-	if [ -d /sys/bus/hid/drivers/hid-generic ]; then
-		printf '%s' "$dev" > /sys/bus/hid/drivers/hid-generic/bind || true
-	fi
-	echo "failed to bind hid-t150 to $dev" >&2
-	exit 1
+if ! printf '%s' "$device" > "$driver/bind"; then
+    touch "$failed"
+    if [ -d "$path" ] && [ ! -L "$path/driver" ]; then
+        printf '%s' "$device" > "$generic/bind" || true
+    fi
+    echo "Could not bind $device to hid-t150." >&2
+    exit 1
 fi

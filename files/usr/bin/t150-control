@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+
+import argparse
+import hashlib
+import json
+import os
+import stat
+import threading
+import tempfile
+from pathlib import Path
+
+from evdev import InputDevice, ecodes as e, ff
+
+HID_PATH = Path("/sys/bus/hid/devices")
+FIRMWARE_PAGE = "https://support.thrustmaster.com/en/product/t150ffb-en/"
+TEST_STRENGTHS = (5, 10, 25, 50)
+REFERENCE_SINE_PERCENT = 50
+LIMITS = {
+    "range": (270, 1080), "gain": (0, 65535), "autocenter": (0, 65535),
+    "enable_autocenter": (0, 1), "constant_level": (0, 100), "periodic_level": (0, 100),
+    "spring_level": (0, 100), "damper_level": (0, 100), "boost": (0, 1),
+    "combine_pedals": (0, 2),
+}
+AXES = {
+    e.ABS_X: "Steering", e.ABS_RZ: "Accelerator", e.ABS_Y: "Brake",
+    e.ABS_THROTTLE: "Clutch", e.ABS_HAT0X: "D-pad horizontal", e.ABS_HAT0Y: "D-pad vertical",
+}
+TESTS = {
+    "Turn right": (e.FF_CONSTANT, 0x4000), "Turn left": (e.FF_CONSTANT, 0xC000),
+    "Sine": (e.FF_PERIODIC, e.FF_SINE), "Sawtooth up": (e.FF_PERIODIC, e.FF_SAW_UP),
+    "Sawtooth down": (e.FF_PERIODIC, e.FF_SAW_DOWN),
+    "Square": (e.FF_PERIODIC, e.FF_SQUARE), "Triangle": (e.FF_PERIODIC, e.FF_TRIANGLE),
+    "Spring": (e.FF_SPRING, None), "Damper": (e.FF_DAMPER, None),
+    "Friction": (e.FF_FRICTION, None), "Inertia": (e.FF_INERTIA, None),
+    "Rumble": (e.FF_RUMBLE, None), "Ramp": (e.FF_RAMP, None),
+}
+
+
+def connected_wheels():
+    return sorted(path for path in HID_PATH.glob("0003:044F:B677.*")
+                  if path.exists())
+
+
+def read_setting(path):
+    value = path.read_text().strip()
+    return {"y": 1, "n": 0}.get(value, value)
+
+
+def validate_settings(values, supported, maximum):
+    if not isinstance(values, dict) or values.keys() != supported:
+        raise ValueError("The profile settings do not match this driver")
+    for key, value in values.items():
+        lower, upper = LIMITS[key]
+        if key == "range":
+            upper = maximum
+        if type(value) is not int or not lower <= value <= upper:
+            raise ValueError(f"Invalid profile value for {key}")
+    return values
+
+
+def save_profile(path, values):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as file:
+        temporary = Path(file.name)
+        try:
+            json.dump(values, file, indent=2)
+            file.write("\n")
+            file.flush()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def build_effect(name, percent):
+    maximum = TEST_STRENGTHS[-1]
+    if not 1 <= percent <= maximum:
+        raise ValueError(f"Test strength must be between 1% and {maximum}%")
+    kind, option = TESTS[name]
+    level = 32768 * percent // 100
+    duration = 500
+    direction = 0x4000
+    if kind == e.FF_CONSTANT:
+        direction = option
+        data = ff.EffectType(ff_constant_effect=ff.Constant(level, ff.Envelope()))
+    elif kind == e.FF_PERIODIC:
+        duration = 1000
+        period = 107 if option == e.FF_SINE else 125
+        data = ff.EffectType(ff_periodic_effect=ff.Periodic(option, period, level, 0, 0,
+                                                           ff.Envelope(), 0, None))
+    elif kind == e.FF_RAMP:
+        data = ff.EffectType(ff_ramp_effect=ff.Ramp(0, level, ff.Envelope()))
+    elif kind == e.FF_RUMBLE:
+        data = ff.EffectType(ff_rumble_effect=ff.Rumble(2 * level, 2 * level))
+    else:
+        duration = 2000
+        condition = ff.Condition(2 * level, 2 * level, level, level, 0, 0)
+        data = ff.EffectType(ff_condition_effect=(ff.Condition * 2)(condition, ff.Condition()))
+    return ff.Effect(kind, -1, direction, ff.Trigger(), ff.Replay(duration, 0), data)
+
+
+def launch():
+    import gi
+    gi.require_version("Gtk", "4.0")
+    from gi.repository import Gio, GLib, Gtk
+
+    class Panel(Gtk.ApplicationWindow):
+        def __init__(self, app):
+            super().__init__(application=app, title="T150 Control", default_width=560,
+                             default_height=530)
+            self.wheel = self.device = self.effect_id = None
+            self.inputs = {}
+            self.axis_values = {}
+            self.settings = {}
+            self.paths = []
+            self.status = Gtk.Label(wrap=True, xalign=0)
+            self.selection = Gtk.DropDown.new_from_strings([])
+            self.selection.connect("notify::selected", self.select_wheel)
+            self.tabs = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+            switcher = Gtk.StackSwitcher(stack=self.tabs, halign=Gtk.Align.CENTER)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14,
+                          margin_start=20, margin_end=20, margin_top=16, margin_bottom=16)
+            for widget in (self.selection, self.status, switcher, self.tabs):
+                box.append(widget)
+            self.tabs.set_vexpand(True)
+            self.set_child(box)
+
+            self.input_page = self.page("inputs", "Inputs")
+            self.travel = Gtk.Label(xalign=0, wrap=True)
+            self.buttons = Gtk.Label(xalign=0, wrap=True)
+            self.reset_button = self.button("Reset travel observation", self.reset_travel)
+
+            force = self.page("forces", "Forces")
+            self.force_choice = Gtk.DropDown.new_from_strings([])
+            self.force_names = []
+            self.strength = Gtk.DropDown.new_from_strings([f"{value}%" for value in TEST_STRENGTHS])
+            self.strength.set_selected(TEST_STRENGTHS.index(25))
+            self.test_button = self.button("Play force test", self.play)
+            self.reference_test = self.button("Play 50% sine for 1 second", self.prepare_reference_sine)
+            self.stop_button = self.button("Stop", self.stop)
+            for widget in (Gtk.Label(label="Test strength", xalign=0), self.strength,
+                           self.force_choice,
+                           Gtk.Label(
+                               label="Keep the rim clear for force pulses. For Spring and Damper, "
+                                     "turn the wheel gently during the test to feel resistance.",
+                               xalign=0, wrap=True),
+                           self.test_button, self.reference_test, self.stop_button):
+                force.append(widget)
+
+            self.tuning = self.page("tuning", "Tuning")
+            self.preset = Gtk.DropDown.new_from_strings([])
+            self.preset_names = []
+            self.profile = Gtk.Entry(placeholder_text="Profile name")
+            self.firmware = self.page("firmware", "Firmware")
+            self.firmware_version = Gtk.Label(xalign=0, wrap=True)
+            self.firmware.append(self.firmware_version)
+            self.firmware.append(Gtk.LinkButton(uri=FIRMWARE_PAGE, label="Thrustmaster firmware support"))
+            self.firmware.append(self.button("Inspect a local package", self.pick_package))
+            self.inspect_result = Gtk.Label(xalign=0, wrap=True, selectable=True)
+            self.firmware.append(self.inspect_result)
+            self.firmware.append(Gtk.Label(label="Native updating and recovery await hardware validation.",
+                                           xalign=0, wrap=True))
+            self.connect("notify::is-active", lambda *_: self.stop() if not self.is_active() else None)
+            self.connect("close-request", self.close_device)
+            self.scan()
+            GLib.timeout_add(1000, self.scan)
+            GLib.timeout_add(33, self.poll)
+
+        def page(self, name, title):
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            scroll = Gtk.ScrolledWindow(child=content)
+            self.tabs.add_titled(scroll, name, title)
+            return content
+
+        @staticmethod
+        def button(label, action):
+            button = Gtk.Button(label=label)
+            button.connect("clicked", action)
+            return button
+
+        @staticmethod
+        def clear(box):
+            while child := box.get_first_child():
+                box.remove(child)
+
+        def scan(self):
+            paths = connected_wheels()
+            if paths != self.paths:
+                current = self.wheel
+                self.paths = paths
+                self.selection.set_model(Gtk.StringList.new([path.name for path in paths]))
+                if current in paths:
+                    self.selection.set_selected(paths.index(current))
+                self.select_wheel()
+            elif self.device is None or (self.wheel and self.wheel.joinpath("range").exists() != bool(self.settings)):
+                self.select_wheel()
+            return True
+
+        def select_wheel(self, *_):
+            self.close_device()
+            index = self.selection.get_selected()
+            self.wheel = self.paths[index] if index < len(self.paths) else None
+            self.inputs.clear()
+            self.axis_values.clear()
+            self.clear(self.input_page)
+            self.clear(self.tuning)
+            self.settings.clear()
+            self.force_names = []
+            self.preset_names = []
+            self.preset.set_model(Gtk.StringList.new([]))
+            self.force_choice.set_model(Gtk.StringList.new([]))
+            self.test_button.set_sensitive(False)
+            self.reference_test.set_sensitive(False)
+            self.stop_button.set_sensitive(False)
+            self.firmware_version.set_text("Firmware version unavailable.")
+            if self.wheel is None:
+                self.status.set_text("Connect a T150 in PS3 mode.")
+                return
+            try:
+                driver = self.wheel.joinpath("driver").resolve(strict=True).name
+                if driver == "hid-t150":
+                    self.populate_tuning()
+                    try:
+                        version = int(read_setting(self.wheel / "firmware_version"))
+                        self.firmware_version.set_text(f"Installed firmware {version}" if version
+                                                       else "The wheel did not report a firmware version.")
+                    except (OSError, ValueError):
+                        pass
+                events = sorted(self.wheel.glob("input/input*/event*"))
+                if not events:
+                    raise OSError("Wheel input device is missing")
+                self.device = InputDevice(f"/dev/input/{events[0].name}")
+                self.populate_inputs()
+                caps = set(self.device.capabilities().get(e.EV_FF, []))
+                if driver == "hid-t150":
+                    self.force_names = [name for name, (kind, option) in TESTS.items()
+                                        if kind in caps and (kind != e.FF_PERIODIC or option in caps)]
+                self.force_choice.set_model(Gtk.StringList.new(self.force_names))
+                self.test_button.set_sensitive(bool(self.force_names))
+                self.reference_test.set_sensitive("Sine" in self.force_names and e.FF_GAIN in caps)
+                self.status.set_text(f"{self.device.name} · {driver}" +
+                                     (" · force feedback unavailable" if not self.force_names else ""))
+                if self.settings and not os.access(self.wheel / "gain", os.W_OK):
+                    self.status.set_text("Settings access requires membership in the t150-control group.")
+            except (OSError, ValueError) as exc:
+                self.status.set_text(str(exc))
+
+        def populate_inputs(self):
+            for code, info in self.device.capabilities().get(e.EV_ABS, []):
+                if code not in AXES:
+                    continue
+                bar = Gtk.ProgressBar(show_text=True)
+                self.input_page.append(Gtk.Label(label=AXES[code], xalign=0))
+                self.input_page.append(bar)
+                self.inputs[code] = bar, info.min, info.max
+                self.update_axis(code, info.value)
+            self.input_page.append(self.buttons)
+            self.input_page.append(self.travel)
+            self.input_page.append(self.reset_button)
+            self.reset_travel()
+            self.update_buttons()
+
+        def update_axis(self, code, value):
+            if code not in self.inputs:
+                return
+            bar, low, high = self.inputs[code]
+            self.axis_values[code] = value
+            fraction = (value - low) / max(1, high - low)
+            bar.set_fraction(min(1, max(0, fraction)))
+            bar.set_text(f"{value} / {high}" if low == 0 else f"{value:+d}")
+            if code == e.ABS_X and hasattr(self, "travel_limits"):
+                self.travel_limits[0] = min(self.travel_limits[0], value)
+                self.travel_limits[1] = max(self.travel_limits[1], value)
+                self.travel.set_text(f"Observed steering travel {self.travel_limits[0]}–{self.travel_limits[1]}. "
+                                     f"Expected center {(high + low) // 2}.")
+
+        def reset_travel(self, *_):
+            center = self.axis_values.get(e.ABS_X, 0)
+            self.travel_limits = [center, center]
+            self.update_axis(e.ABS_X, center)
+
+        def update_buttons(self):
+            keys = ", ".join(str(key - e.BTN_JOYSTICK + 1) if e.BTN_JOYSTICK <= key < e.BTN_JOYSTICK + 13
+                             else str(e.KEY.get(key, key)) for key in self.device.active_keys())
+            self.buttons.set_text(f"Buttons held  {keys}" if keys else "No buttons held")
+
+        def poll(self):
+            if self.device is not None:
+                try:
+                    for event in self.device.read():
+                        if event.type == e.EV_ABS:
+                            self.update_axis(event.code, event.value)
+                        elif event.type == e.EV_KEY:
+                            self.update_buttons()
+                except BlockingIOError:
+                    pass
+                except OSError:
+                    self.close_device()
+                    self.status.set_text("Wheel input disconnected.")
+            return True
+
+        def populate_tuning(self):
+            self.maximum = int(read_setting(self.wheel / "max_range"))
+            labels = {
+                "range": "Rotation (degrees)", "gain": "Overall gain (%)",
+                "autocenter": "Wheel centering strength (%)", "enable_autocenter": "Centering source",
+                "constant_level": "Constant force (%)", "periodic_level": "Periodic force (%)",
+                "spring_level": "Spring (%)", "damper_level": "Damper (%)", "boost": "Low-force boost",
+                "combine_pedals": "Pedal axes",
+            }
+            choices = {"enable_autocenter": ["Game", "Wheel"], "boost": ["Off", "On"],
+                       "combine_pedals": ["Separate", "Accelerator + brake", "Accelerator + clutch"]}
+            tuning_grid = Gtk.Grid(row_spacing=7, column_spacing=12)
+            self.tuning.append(tuning_grid)
+            for row, (key, (minimum, maximum)) in enumerate(LIMITS.items()):
+                if not (self.wheel / key).exists():
+                    continue
+                if key in choices:
+                    widget = Gtk.DropDown.new_from_strings(choices[key])
+                else:
+                    if key in ("gain", "autocenter"):
+                        maximum = 100
+                    elif key == "range":
+                        maximum = self.maximum
+                    widget = Gtk.SpinButton.new_with_range(minimum, maximum, 1)
+                self.settings[key] = widget
+                label = Gtk.Label(label=labels[key], xalign=0, hexpand=True, mnemonic_widget=widget)
+                tuning_grid.attach(label, 0, row, 1, 1)
+                tuning_grid.attach(widget, 1, row, 1, 1)
+            self.refresh_settings()
+            self.tuning.append(self.button("Apply tuning", self.apply_tuning))
+            self.preset_names = self.wheel.joinpath("presets").read_text().split()
+            self.preset.set_model(Gtk.StringList.new(self.preset_names))
+            self.tuning.append(self.preset)
+            self.tuning.append(self.button("Apply built-in preset", self.apply_preset))
+            self.tuning.append(self.profile)
+            actions = Gtk.Box(spacing=8)
+            actions.append(self.button("Save profile", self.save))
+            actions.append(self.button("Apply profile", self.load))
+            self.tuning.append(actions)
+
+        def refresh_settings(self):
+            for key, widget in self.settings.items():
+                value = int(read_setting(self.wheel / key))
+                if isinstance(widget, Gtk.DropDown):
+                    widget.set_selected(value)
+                else:
+                    widget.set_value(value * 100 / 65535 if key in ("gain", "autocenter") else value)
+
+        def current_values(self):
+            values = {}
+            for key, widget in self.settings.items():
+                if isinstance(widget, Gtk.DropDown):
+                    value = widget.get_selected()
+                else:
+                    value = widget.get_value_as_int()
+                    if key in ("gain", "autocenter"):
+                        value = round(value * 65535 / 100)
+                values[key] = value
+            return values
+
+        def write_settings(self, values):
+            validate_settings(values, set(self.settings), self.maximum)
+            self.stop()
+            previous = {key: int(read_setting(self.wheel / key)) for key in values}
+            applied = []
+            try:
+                for key, value in values.items():
+                    if value != previous[key]:
+                        (self.wheel / key).write_text(f"{value}\n")
+                        applied.append(key)
+            except OSError as exc:
+                unrecovered = []
+                for key in reversed(applied):
+                    try:
+                        (self.wheel / key).write_text(f"{previous[key]}\n")
+                    except OSError:
+                        unrecovered.append(key)
+                if unrecovered:
+                    raise OSError(f"{exc}. Could not restore {', '.join(unrecovered)}.") from exc
+                raise
+            self.refresh_settings()
+
+        def apply_tuning(self, *_):
+            try:
+                self.write_settings(self.current_values())
+                self.status.set_text("Wheel tuning applied.")
+            except (OSError, ValueError) as exc:
+                self.status.set_text(f"Tuning failed. {exc}")
+
+        def apply_preset(self, *_):
+            self.stop()
+            try:
+                name = self.preset_names[self.preset.get_selected()]
+                self.wheel.joinpath("preset").write_text(name + "\n")
+                self.refresh_settings()
+                self.status.set_text(f"Applied {name}.")
+            except (OSError, ValueError, IndexError) as exc:
+                self.status.set_text(f"Preset failed. {exc}")
+
+        def profile_path(self):
+            name = self.profile.get_text().strip()
+            if not name or len(name) > 64 or not all(c.isalnum() or c in " -_" for c in name):
+                raise ValueError("Use up to 64 letters, numbers, spaces, hyphens or underscores.")
+            return Path(GLib.get_user_config_dir()) / "t150-control" / "profiles" / (name + ".json")
+
+        def save(self, *_):
+            try:
+                save_profile(self.profile_path(), self.current_values())
+                self.status.set_text("Profile saved.")
+            except (OSError, ValueError) as exc:
+                self.status.set_text(str(exc))
+
+        def load(self, *_):
+            try:
+                self.write_settings(json.loads(self.profile_path().read_text()))
+                self.status.set_text("Profile applied.")
+            except (OSError, ValueError) as exc:
+                self.status.set_text(str(exc))
+
+        def play(self, *_):
+            self.stop()
+            try:
+                name = self.force_names[self.force_choice.get_selected()]
+                effect = build_effect(name, TEST_STRENGTHS[self.strength.get_selected()])
+            except (ValueError, IndexError) as exc:
+                self.status.set_text(f"Force test failed. {exc}")
+            else:
+                self.play_effect(effect)
+
+        def prepare_reference_sine(self, *_):
+            self.stop()
+            if self.device is None:
+                return
+            try:
+                axis = self.device.absinfo(e.ABS_X)
+                if axis is None or axis.max <= axis.min:
+                    self.status.set_text("Steering position is unavailable.")
+                    return
+                if abs(2 * axis.value - axis.max - axis.min) > (axis.max - axis.min) // 2:
+                    self.status.set_text("Center the wheel before the 50% sine test.")
+                    return
+                self.device.write(e.EV_FF, e.FF_GAIN, 65535)
+            except OSError as exc:
+                self.status.set_text(f"Force test failed. {exc}")
+                return
+
+            self.status.set_text("Starting the one-second sine test. Keep the rim clear.")
+            self.stop_button.set_sensitive(True)
+            self.test_timer = GLib.timeout_add(500, self.start_reference_sine)
+
+        def start_reference_sine(self):
+            self.test_timer = None
+            self.play_effect(build_effect("Sine", REFERENCE_SINE_PERCENT))
+            return False
+
+        def play_effect(self, effect):
+            if self.device is None:
+                return
+            try:
+                self.effect_id = self.device.upload_effect(effect)
+                self.device.write(e.EV_FF, self.effect_id, 1)
+                self.status.set_text("Force test playing.")
+                self.stop_button.set_sensitive(True)
+                self.test_timer = GLib.timeout_add(effect.ff_replay.length + 50, self.end_test)
+            except OSError as exc:
+                self.stop()
+                self.status.set_text(f"Force test failed. {exc}")
+
+        def end_test(self):
+            self.test_timer = None
+            self.stop()
+            return False
+
+        def stop(self, *_):
+            if self.effect_id is not None or getattr(self, "test_timer", None):
+                self.status.set_text("Force test stopped.")
+            if getattr(self, "test_timer", None):
+                GLib.source_remove(self.test_timer)
+                self.test_timer = None
+            if self.device is not None and self.effect_id is not None:
+                effect_id, self.effect_id = self.effect_id, None
+                try:
+                    self.device.write(e.EV_FF, effect_id, 0)
+                except OSError:
+                    pass
+                try:
+                    self.device.erase_effect(effect_id)
+                except OSError as exc:
+                    self.status.set_text(f"Could not confirm test stop. {exc}")
+                    self.device.close()
+                    self.device = None
+            self.stop_button.set_sensitive(False)
+
+        def close_device(self, *_):
+            self.stop()
+            if self.device is not None:
+                self.device.close()
+                self.device = None
+            return False
+
+        def pick_package(self, *_):
+            dialog = Gtk.FileDialog(title="Inspect firmware package")
+            dialog.open(self, None, self.inspect_package)
+
+        def inspect_package(self, dialog, result):
+            try:
+                selected = dialog.open_finish(result)
+                if selected.get_path():
+                    self.inspect_result.set_text("Inspecting package…")
+                    threading.Thread(target=self.hash_package,
+                                     args=(Path(selected.get_path()),), daemon=True).start()
+            except GLib.Error:
+                pass
+
+        def hash_package(self, path):
+            try:
+                message = inspect_package(path)
+            except (OSError, ValueError) as exc:
+                message = str(exc)
+            GLib.idle_add(self.inspect_result.set_text, message)
+
+    app = Gtk.Application(application_id="io.github.mitch030504.T150Control",
+                          flags=Gio.ApplicationFlags.DEFAULT_FLAGS)
+    app.connect("activate", lambda app: (app.get_active_window() or Panel(app)).present())
+    return app.run([])
+
+
+def inspect_package(path):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), "rb") as file:
+        if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+            raise ValueError("Select a regular package file.")
+        header = file.read(64)
+        if len(header) != 64 or header[:2] != b"MZ":
+            raise ValueError("Expected a Windows executable package from the official support page.")
+        file.seek(int.from_bytes(header[60:64], "little"))
+        if file.read(4) != b"PE\0\0":
+            raise ValueError("The file does not contain a valid Windows executable header.")
+        file.seek(0)
+        digest = hashlib.file_digest(file, "sha256").hexdigest()
+    return (f"{path.name}\nSHA-256  {digest}\n"
+            "Package contents and device compatibility require a verified firmware manifest.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Configure and test a Thrustmaster T150.")
+    parser.add_argument("--inspect-firmware", type=Path, metavar="PACKAGE")
+    parser.add_argument("--diagnose", action="store_true")
+    args = parser.parse_args()
+    if args.inspect_firmware:
+        try:
+            print(inspect_package(args.inspect_firmware))
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f"{exc}\n")
+    elif args.diagnose:
+        wheels = connected_wheels()
+        for path in wheels:
+            print(f"{path.name}  {path.joinpath('driver').resolve().name}")
+            for key in ("firmware_version", "supported_ff_effects", *LIMITS):
+                try:
+                    print(f"  {key}  {read_setting(path / key)}")
+                except OSError:
+                    continue
+        if not wheels:
+            parser.exit(1, "No T150 in native USB mode.\n")
+    else:
+        return launch()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

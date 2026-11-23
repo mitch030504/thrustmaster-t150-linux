@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=T150 Control
+Comment=Configure and test a Thrustmaster T150 racing wheel
+Type=Application
+Exec=t150-control
+Icon=preferences-desktop-peripherals
+Categories=Settings;HardwareSettings;

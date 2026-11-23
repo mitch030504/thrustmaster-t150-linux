@@ -38,3 +38,9 @@ common/test_encode
 traffic/sniffer
 traffic/sender
 traffic/tests
+
+# Arch packaging working directories and archives
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.pkg.tar.*
+__pycache__/

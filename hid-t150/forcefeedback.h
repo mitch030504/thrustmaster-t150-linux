@@ -1,5 +1,4 @@
 /* Packet layout and commit codes: keep in sync with common/t150_packets.h. */
-#define T150_FF_BLIND_COMPUTE_EFFECT		false
 #define T150_FF_BLIND_UPLOAD			false
 
 /* pk_id0/pk_id1 are 8-bit (id * 0x1c + 0x1c must fit). Linux ids 0..8. */
@@ -105,9 +104,9 @@ static int t150_ff_play(struct input_dev *dev, int effect_id, int value);
 static void t150_ff_set_gain(struct input_dev *dev, uint16_t gain);
 static void t150_ff_set_autocenter(struct input_dev *dev, uint16_t value);
 static void t150_ff_work(struct work_struct *work);
+static int t150_ff_quiesce(struct t150 *t150, bool forget);
 static void t150_ff_resubmit_condition_effects(struct t150 *t150, uint16_t type);
 
-static uint8_t t150_ffb_effects_length = 10;
 static const int16_t t150_ffb_effects[] = {
 	FF_GAIN,
 	FF_AUTOCENTER,
