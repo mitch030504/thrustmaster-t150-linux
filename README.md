@@ -11,34 +11,21 @@ udev rebind off `hid-generic`, Fedora packaging, and a FreeBSD port.
 **This is not an official Thrustmaster driver.** There is no warranty.
 Loading it is at your own risk.
 
-## Linux control panel development branch
+## Linux control panel
 
-This fork adds a GTK 4 **T150 Control** app for the T150/T150RS. Its inputs
-page shows the wheel, pedals, D-pad, and buttons even when the wheel is
-bound to `hid-generic`. With `hid-t150` loaded it adds tuning, named local
-profiles, and short force tests selected from the effects the driver
-advertises. Firmware inspection recognizes a Windows executable and
-computes a SHA-256 fingerprint. Native update and recovery require
-protocol captures and successful recovery testing on a spare wheel.
+**T150 Control** is a GTK 4 app for the T150 and T150RS. Its Inputs tab
+shows the wheel, pedals, D-pad, and buttons when the device is bound to
+either `hid-t150` or `hid-generic`. With `hid-t150`, the app can apply
+wheel settings and presets, save local profiles, and run short tests of
+the advertised force effects. The Firmware tab reads the installed
+version and computes a SHA-256 fingerprint for a local Windows updater.
+Use Thrustmaster's Windows updater to flash firmware.
 
-**Status.** This branch is for development testing. The Linux hardware
-matrix below describes the parent fork. See [TESTING.md](TESTING.md) for
-the acceptance procedure and the remaining release gates.
-
-On Arch/CachyOS, install the matching kernel headers and DKMS. Build both
-packages with `cd packaging/arch && makepkg` and install the resulting
-`t150-dkms` and `t150-control` packages together with `pacman -U`. For
-the direct install path below, install GTK 4, PyGObject, and python-evdev
-to run the panel. Then add the account that will tune the wheel to the
-dedicated group and sign in again:
-
-```sh
-sudo usermod -aG t150-control "$USER"
-t150-control
-```
-
-Use `t150-control --diagnose` to report binding and settings without
-starting a force test.
+The [v1.2.0 preview](https://github.com/mitch030504/thrustmaster-t150-linux/releases/tag/v1.2.0)
+includes Arch/CachyOS packages and source archives. On a T150RS with
+firmware 35, the panel's sine test produced noticeable feedback at 25%
+and 50%. See [TESTING.md](TESTING.md) for the full wheel acceptance
+procedure. The driver also supports the TMX after initialization.
 
 ## Parent fork tested status
 
@@ -125,10 +112,29 @@ the wheel shows up as a joystick with `ff=0`.
 
 ## Install (Linux)
 
+### Arch Linux and CachyOS
+
+Install the headers for your kernel (`linux-headers`,
+`linux-cachyos-headers`, or `linux-cachyos-rc-headers`, for example).
+Clang-built CachyOS kernels also need `clang`, `lld`, and `llvm`.
+Download both `.pkg.tar.zst` files from the [v1.2.0 preview](https://github.com/mitch030504/thrustmaster-t150-linux/releases/tag/v1.2.0)
+and run this in the download directory:
+
+```sh
+sudo pacman -U ./t150-dkms-1.2.0-0.1-any.pkg.tar.zst ./t150-control-1.2.0-0.1-any.pkg.tar.zst
+```
+
+To build the same packages from source, run `makepkg` in `packaging/arch`.
+If the running kernel was replaced by a system update, reboot into an
+installed kernel with matching headers before loading the module.
+
+### Install from source
+
 Needs matching kernel headers and a compiler. Clang-built kernels
 (CachyOS and some custom kernels) are detected from
 `CONFIG_CC_IS_CLANG`; the Makefile then passes `LLVM=1`. Stock Fedora
-uses GCC.
+uses GCC. On Linux, T150 Control also needs GTK 4.10 or later, PyGObject,
+and python-evdev on Python 3.11 or later.
 
 ```sh
 sudo ./install.sh
@@ -139,7 +145,8 @@ On Linux the script:
 1. Builds the module — DKMS when `dkms` is installed, otherwise for the
    running kernel only (`extra/hid-t150`)
 2. Installs udev rules, `/usr/lib/udev/hid-t150-rebind`,
-   `modules-load.d`, and `modprobe.d`
+   autoload configuration, `t150-preset`, and the control panel with its
+   desktop launcher
 3. Relabels those files with `restorecon` when SELinux is present
 4. Loads `hid-t150` and rebinds any already-plugged T150/TMX
 5. Prints a MOK reminder when `mokutil` says Secure Boot is on
@@ -164,6 +171,20 @@ sudo apt install dkms                          # optional, recommended
 
 Install DKMS if you want the module rebuilt on kernel upgrades.
 Without it, run `sudo ./install.sh` again after a kernel update.
+
+### Open the control panel
+
+After installing, add your account to the wheel settings group:
+
+```sh
+sudo usermod -aG t150-control "$USER"
+```
+
+Sign out and back in, then open **T150 Control** from your application
+menu or run `t150-control`. Use `t150-control --diagnose` to check wheel
+detection and driver binding without starting a force test. If the wheel
+was connected during a package install, run `sudo modprobe hid-t150`
+and reconnect the wheel.
 
 ### Unsigned modules
 
@@ -201,7 +222,8 @@ Force feedback: `fftest /dev/input/eventN` from linuxconsole tools, or
 any game that uses Linux FF (SDL, Proton with the Linux evdev path,
 Oversteer’s test).
 
-Uninstall:
+Remove the Arch packages with `sudo pacman -R t150-control t150-dkms`.
+For a source install, run:
 
 ```sh
 sudo ./uninstall.sh
@@ -467,16 +489,17 @@ reboot: `sysctl hw.usb.usbhid.enable` should be `1`.
 ## Layout
 
 ```
-hid-t150/          Linux HID driver (version 1.1)
-files/             udev, modules-load.d, modprobe.d, rebind helper, t150-preset
+hid-t150/          Linux HID driver
+files/             udev rules, helpers, control panel, and system configuration
 freebsd/           hidbus kmod ht150 + ht150ctl
 common/            portable packet structs / encode / feel presets
+packaging/arch/    t150-dkms and t150-control split packages
 packaging/fedora/  t150-dkms.spec and build-rpm.sh
 install.sh         Linux or FreeBSD
 ```
 
-DKMS package name is `t150`, version `1.1`. The module installs under
-`/lib/modules/$(uname -r)/extra/hid-t150/`.
+The DKMS module is `t150/1.2.0`. Run `modinfo -n hid-t150` to locate
+the installed module for the running kernel.
 
 ## License
 
